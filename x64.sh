@@ -24,4 +24,4 @@ export CROSSCXXFLAGS="-march=x86-64 ${_CROSS_FLAGS}"
 export LDFLAGS="${_LD_FLAGS}"
 export CROSSLDFLAGS="${_CROSS_LD_FLAGS}"
 
-export arg=(--enable-win64 --enable-archs=i386,x86_64 --disable-winemenubuilder --disable-win16 --disable-tests --without-capi --without-coreaudio --without-cups --without-gphoto --without-osmesa --without-oss --without-pcap --without-pcsclite --without-sane --without-udev --without-unwind --without-usb --without-v4l2 --without-wayland --without-xinerama --without-piper)
+export arg=(--enable-win64 --enable-archs=i386,x86_64 --disable-winemenubuilder --disable-winedmo --disable-win16 --disable-tests --without-capi --without-coreaudio --without-cups --without-gphoto --without-osmesa --without-oss --without-pcap --without-pcsclite --without-sane --without-udev --without-unwind --without-usb --without-v4l2 --without-wayland --without-xinerama --without-piper)
