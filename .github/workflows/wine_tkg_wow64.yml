@@ -54,7 +54,6 @@ jobs:
               grep -Ev '\^\{\}$' | sed 's/.*\///' | grep -E '^wine-[0-9]+\.[0-9]+.*$' | sort -V | tail -n 1)
           fi
 
-          # 🔴 关键修复：变量名拼写错误
           if [ -z "$latest_tag" ]; then
             echo "❌ Failed to get latest Wine tag!"
             exit 1
@@ -103,6 +102,7 @@ jobs:
         run: |
           wine_tag="${{ steps.wine-mirror.outputs.tag }}"
           wine_ver="${wine_tag#wine-}"
+          pkg_name=""
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
           fi
@@ -148,14 +148,48 @@ jobs:
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
 
+          # ========== 修复：创建 /tmp/wine-termux 目录并复制脚本 ==========
+          echo "Creating /tmp/wine-termux directory with required scripts..."
+          sudo mkdir -p /tmp/archlinux/tmp/wine-termux
+          
+          # 从仓库根目录复制必要的脚本
+          if [ -f "$GITHUB_WORKSPACE/patch.sh" ]; then
+            sudo cp "$GITHUB_WORKSPACE/patch.sh" /tmp/archlinux/tmp/wine-termux/
+            echo "✅ Copied patch.sh"
+          else
+            echo "❌ patch.sh not found in repository root!"
+            exit 1
+          fi
+          
+          if [ -f "$GITHUB_WORKSPACE/set-tkg-cfg.sh" ]; then
+            sudo cp "$GITHUB_WORKSPACE/set-tkg-cfg.sh" /tmp/archlinux/tmp/wine-termux/
+            echo "✅ Copied set-tkg-cfg.sh"
+          else
+            echo "❌ set-tkg-cfg.sh not found in repository root!"
+            exit 1
+          fi
+          
+          # 确保脚本可执行
+          sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
+          
+          # 验证文件存在
+          echo "Contents of /tmp/wine-termux:"
+          sudo ls -la /tmp/archlinux/tmp/wine-termux/
+          # ============================================================
+
           # 创建构建脚本
           cat > build-wine.sh << 'EOF'
           #!/bin/bash
           set -e
           mkdir -p ~/.cache
 
-          if [ ! -d /tmp/wine-termux ]; then
-            echo "❌ Source dir /tmp/wine-termux not found!"
+          # 检查必要的脚本是否存在
+          if [ ! -f /tmp/wine-termux/patch.sh ]; then
+            echo "❌ /tmp/wine-termux/patch.sh not found!"
+            exit 1
+          fi
+          if [ ! -f /tmp/wine-termux/set-tkg-cfg.sh ]; then
+            echo "❌ /tmp/wine-termux/set-tkg-cfg.sh not found!"
             exit 1
           fi
 
@@ -265,7 +299,7 @@ jobs:
         with:
           target_commitish: ${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}
           tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}
-          name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${% if steps.wine_tag.outputs.PKG_NAME == 'mf' %}mf{% else %}dxgi{% endif %}) TkG Staging GE
+          name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME == 'mf' && 'mf' || 'dxgi' }}) TkG Staging GE
           body: |
             自动编译版本。
             [源码](https://github.com/Waim908/wine-termux/tree/${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }})
