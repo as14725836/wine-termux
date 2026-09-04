@@ -1,27 +1,48 @@
 #!/bin/bash
 export script_dir="$(dirname $(readlink -f "$0"))"
 
-# ========== 新增：应用自定义补丁 ==========
+# ========== 应用自定义补丁（根据 PATCH_SOURCE 变量，二选一） ==========
 apply_custom_patches() {
     echo "=== 应用自定义补丁 ==="
     
-    # 检查补丁目录是否存在
-    if [ ! -d "$script_dir/patch" ]; then
-        echo "⚠️  补丁目录不存在: $script_dir/patch"
+    # 检查 PATCH_SOURCE 变量
+    local patch_dir=""
+    case "${PATCH_SOURCE:-none}" in
+        "patch")
+            patch_dir="$script_dir/patch"
+            echo "📁 选择补丁目录: patch/"
+            ;;
+        "patch11.16")
+            patch_dir="$script_dir/patch11.16"
+            echo "📁 选择补丁目录: patch11.16/"
+            ;;
+        "none"|"")
+            echo "ℹ️  未选择补丁目录 (PATCH_SOURCE=none)，跳过自定义补丁"
+            return 0
+            ;;
+        *)
+            echo "⚠️  未知的补丁目录: ${PATCH_SOURCE}，跳过"
+            return 0
+            ;;
+    esac
+    
+    # 检查目录是否存在
+    if [ ! -d "$patch_dir" ]; then
+        echo "⚠️  补丁目录不存在: $patch_dir"
         return 0
     fi
     
     # 统计补丁数量
-    local patch_count=$(ls -1 "$script_dir/patch"/*.patch 2>/dev/null | wc -l)
+    local patch_count=$(ls -1 "$patch_dir"/*.patch 2>/dev/null | wc -l)
     if [ "$patch_count" -eq 0 ]; then
-        echo "⚠️  没有找到 .patch 文件"
+        echo "⚠️  目录中没有找到 .patch 文件: $patch_dir"
         return 0
     fi
     
     echo "找到 $patch_count 个补丁文件"
     
     # 按顺序应用所有补丁
-    for patch_file in "$script_dir"/patch/*.patch; do
+    for patch_file in "$patch_dir"/*.patch; do
         if [ -f "$patch_file" ]; then
             local patch_name=$(basename "$patch_file")
             echo "  应用补丁: $patch_name"
@@ -35,7 +56,7 @@ apply_custom_patches() {
     
     echo "=== 自定义补丁应用完成 ==="
 }
-# ========================================
+# ===========================================================
 
 proton_apply_patch() {
   if [[ -d $script_dir/$1/$2 ]]; then
