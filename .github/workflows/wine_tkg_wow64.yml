@@ -25,8 +25,17 @@ on:
         required: false
         type: boolean
         default: true
+      patch_source:
+        description: "选择要应用的自定义补丁目录"
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - patch
+          - patch11.16
   schedule:
-    - cron: "0 1 * * *" # 每日 01:00 检查一次（UTC 时间）
+    - cron: "0 1 * * *"
 
 jobs:
   BCC:
@@ -36,7 +45,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 使用 cache 保存上一次看到的 tag
       - name: Restore last wine release tag from cache
         id: cache-tag
         uses: actions/cache@v4
@@ -54,7 +62,6 @@ jobs:
             echo "Use custom tag from manual dispatch: $CUSTOM_TAG"
             latest_tag="$CUSTOM_TAG"
           else
-            # 获取 wine-mirror/wine 的最新标签
             latest_tag=$(git ls-remote --tags https://github.com/wine-mirror/wine.git | \
               grep -Ev '\^\{\}$' | sed 's/.*\///' | grep -E '^wine-[0-9]+\.[0-9]+.*$' | sort -V | tail -n 1)
           fi
@@ -100,7 +107,6 @@ jobs:
             fi
           fi
 
-      # 只有需要构建时才执行后续步骤
       - name: Set build variables
         if: steps.need_build.outputs.new_release == 'true'
         id: wine_tag
@@ -116,6 +122,7 @@ jobs:
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
           echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
+          echo "patch_source=${{ github.event.inputs.patch_source || 'none' }}" >> "$GITHUB_OUTPUT"
 
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
@@ -129,7 +136,6 @@ jobs:
             fetchJobs = $(nproc)
           EOF
 
-          # 克隆 TkG 项目
           tkg_branch="${{ github.event.inputs.tkg }}"
           if [ -z "$tkg_branch" ]; then
             git clone https://github.com/Frogging-Family/wine-tkg-git.git
@@ -139,10 +145,8 @@ jobs:
 
           cd /tmp
 
-          # 下载 BCC 根文件系统
           aria2c -s$(nproc) -x$(nproc) https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
 
-          # 解压并验证
           sudo tar xf wine-bcc.tar.xz || { echo "❌ Extract failed"; exit 1; }
 
           if [ ! -d "archlinux" ]; then
@@ -150,15 +154,12 @@ jobs:
             exit 1
           fi
 
-          # 移动项目到 rootfs
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
 
-          # ========== 修复：创建 /tmp/wine-termux 目录并复制脚本 ==========
           echo "Creating /tmp/wine-termux directory with required scripts..."
           sudo mkdir -p /tmp/archlinux/tmp/wine-termux
           
-          # 从仓库根目录复制必要的脚本
           if [ -f "$GITHUB_WORKSPACE/patch.sh" ]; then
             sudo cp "$GITHUB_WORKSPACE/patch.sh" /tmp/archlinux/tmp/wine-termux/
             echo "✅ Copied patch.sh"
@@ -175,21 +176,16 @@ jobs:
             exit 1
           fi
           
-          # 确保脚本可执行
           sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
           
-          # 验证文件存在
           echo "Contents of /tmp/wine-termux:"
           sudo ls -la /tmp/archlinux/tmp/wine-termux/
-          # ============================================================
 
-          # 创建构建脚本
           cat > build-wine.sh << 'EOF'
           #!/bin/bash
           set -e
           mkdir -p ~/.cache
 
-          # 检查必要的脚本是否存在
           if [ ! -f /tmp/wine-termux/patch.sh ]; then
             echo "❌ /tmp/wine-termux/patch.sh not found!"
             exit 1
@@ -199,7 +195,6 @@ jobs:
             exit 1
           fi
 
-          # 加载 ccache
           if [ -f /tmp/ccache.tar.xz ]; then
             echo "✅ Using cached ccache..."
             mkdir -p ~/.cache/ccache
@@ -209,13 +204,13 @@ jobs:
           export USE_CACHE=1
           export ENABLE_PROTON_MF=${{ steps.wine-mirror.outputs.enable_mf }}
           export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
+          export PATCH_SOURCE=${{ steps.wine_tag.outputs.patch_source }}
 
           cd /tmp/wine-tkg-git/wine-tkg-git/
 
           bash -x /tmp/wine-termux/patch.sh wine-tkg-auto "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
           bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
 
-          # 手动开关：关闭 esync 以绕过新版 wine 的 esync-unix 补丁失败
           if [ "$ENABLE_ESYNC" = "false" ]; then
             echo "⚠️ esync 已手动禁用，将关闭 _use_esync"
             sed -i 's/^_use_esync=.*/_use_esync="false"/' customization.cfg
@@ -240,7 +235,6 @@ jobs:
           sudo chmod +x build-wine.sh
           sudo mv build-wine.sh archlinux/bin/build-wine.sh
 
-      # --- ccache 缓存恢复 ---
       - name: Restore ccache
         if: steps.need_build.outputs.new_release == 'true'
         uses: actions/cache/restore@v5
@@ -258,7 +252,6 @@ jobs:
           sudo chroot archlinux /bin/build-wine.sh
           bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
 
-          # 确保生成产物存在
           if [ ! -f "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz" ]; then
             echo "❌ Build output not found!"
             exit 1
@@ -267,7 +260,6 @@ jobs:
           sudo chmod 644 "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz"
           sudo chmod 644 /tmp/archlinux/tmp/ccache.tar.xz
 
-      # --- 保存 ccache 缓存 ---
       - name: Save ccache
         if: steps.need_build.outputs.new_release == 'true' && github.run_attempt == 1
         uses: actions/cache/save@v5
