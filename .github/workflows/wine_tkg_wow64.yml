@@ -20,6 +20,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_esync:
+        description: "启用 esync（新版 wine 的 esync-unix 补丁可能不兼容，失败时关闭此开关绕过）"
+        required: false
+        type: boolean
+        default: true
   schedule:
     - cron: "0 1 * * *" # 每日 01:00 检查一次（UTC 时间）
 
@@ -110,6 +115,7 @@ jobs:
           echo "wine_tag=$wine_tag" >> "$GITHUB_OUTPUT"
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
+          echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
 
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
@@ -202,11 +208,19 @@ jobs:
 
           export USE_CACHE=1
           export ENABLE_PROTON_MF=${{ steps.wine-mirror.outputs.enable_mf }}
+          export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
 
           cd /tmp/wine-tkg-git/wine-tkg-git/
 
           bash -x /tmp/wine-termux/patch.sh wine-tkg-auto "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
           bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
+
+          # 手动开关：关闭 esync 以绕过新版 wine 的 esync-unix 补丁失败
+          if [ "$ENABLE_ESYNC" = "false" ]; then
+            echo "⚠️ esync 已手动禁用，将关闭 _use_esync"
+            sed -i 's/^_use_esync=.*/_use_esync="false"/' customization.cfg
+            grep -q '^_use_esync=' customization.cfg || echo '_use_esync="false"' >> customization.cfg
+          fi
 
           echo '_ci_build="true"' >> customization.cfg
 
