@@ -134,7 +134,7 @@ jobs:
           cd /tmp
 
           # 下载 BCC 根文件系统
-          aria2c -s$(nproc) -x$(nproc) https://github.com/Waim908/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+          aria2c -s$(nproc) -x$(nproc) https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
 
           # 解压并验证
           sudo tar xf wine-bcc.tar.xz || { echo "❌ Extract failed"; exit 1; }
