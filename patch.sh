@@ -1,4 +1,42 @@
+#!/bin/bash
 export script_dir="$(dirname $(readlink -f "$0"))"
+
+# ========== 新增：应用自定义补丁 ==========
+apply_custom_patches() {
+    echo "=== 应用自定义补丁 ==="
+    
+    # 检查补丁目录是否存在
+    if [ ! -d "$script_dir/patch" ]; then
+        echo "⚠️  补丁目录不存在: $script_dir/patch"
+        return 0
+    fi
+    
+    # 统计补丁数量
+    local patch_count=$(ls -1 "$script_dir/patch"/*.patch 2>/dev/null | wc -l)
+    if [ "$patch_count" -eq 0 ]; then
+        echo "⚠️  没有找到 .patch 文件"
+        return 0
+    fi
+    
+    echo "找到 $patch_count 个补丁文件"
+    
+    # 按顺序应用所有补丁
+    for patch_file in "$script_dir"/patch/*.patch; do
+        if [ -f "$patch_file" ]; then
+            local patch_name=$(basename "$patch_file")
+            echo "  应用补丁: $patch_name"
+            if patch -p1 < "$patch_file" 2>&1; then
+                echo "  ✅ $patch_name 应用成功"
+            else
+                echo "  ⚠️  $patch_name 应用失败（跳过）"
+            fi
+        fi
+    done
+    
+    echo "=== 自定义补丁应用完成 ==="
+}
+# ========================================
+
 proton_apply_patch() {
   if [[ -d $script_dir/$1/$2 ]]; then
     . $script_dir/$1/$2/___patch___.conf $3
@@ -57,7 +95,7 @@ add_tkg_mfdxgi() {
     major_ver=$(echo "$ver" | cut -d. -f1)
     minor_ver=$(echo "$ver" | cut -d. -f2)
 
-    echo "mfdxgi: Add env \'\$WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER\' only (no full proton mf patch)"
+    echo "mfdxgi: Add env '\$WINE_DO_NOT_CREATE_DXGI_DEVICE_MANAGER' only (no full proton mf patch)"
 
     if [ "$major_ver" -eq 9 ]; then
       cp "$script_dir/wine9_do_not_create_dxgi_device_manager.patch" $3/wine9_do_not_create_dxgi_device_manager.mylatepatch || exit 1
@@ -70,9 +108,18 @@ add_tkg_mfdxgi() {
 }
 
 case $1 in
-proton) proton_apply_patch proton $2 || exit 1 ;;
-wine-tkg) wine_apply_patch wine-tkg-git-staging-ge $2 || exit 1
-  add_tkg_mfdxgi ;;
-wine-tlg-auto) copy_patches wine-tkg-git-staging-ge $2 $3 || exit 1
-  add_tkg_mfdxgi ;;
+proton) 
+    proton_apply_patch proton $2 || exit 1
+    apply_custom_patches
+    ;;
+wine-tkg) 
+    wine_apply_patch wine-tkg-git-staging-ge $2 || exit 1
+    add_tkg_mfdxgi
+    apply_custom_patches
+    ;;
+wine-tlg-auto) 
+    copy_patches wine-tkg-git-staging-ge $2 $3 || exit 1
+    add_tkg_mfdxgi
+    apply_custom_patches
+    ;;
 esac
