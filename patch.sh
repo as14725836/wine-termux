@@ -138,7 +138,7 @@ wine-tkg)
     add_tkg_mfdxgi
     apply_custom_patches
     ;;
-wine-tlg-auto) 
+wine-tkg-auto) 
     copy_patches wine-tkg-git-staging-ge $2 $3 || exit 1
     add_tkg_mfdxgi
     apply_custom_patches
