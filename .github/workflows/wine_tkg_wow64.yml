@@ -157,25 +157,21 @@ jobs:
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
 
-          echo "Creating /tmp/wine-termux directory with required scripts..."
+          echo "Creating /tmp/wine-termux directory with all scripts & patches..."
           sudo mkdir -p /tmp/archlinux/tmp/wine-termux
-          
-          if [ -f "$GITHUB_WORKSPACE/patch.sh" ]; then
-            sudo cp "$GITHUB_WORKSPACE/patch.sh" /tmp/archlinux/tmp/wine-termux/
-            echo "✅ Copied patch.sh"
-          else
+          # 复制整个仓库（含 patch.sh、set-tkg-cfg.sh、patch/、patch11.16/、wine-tkg-git-staging-ge/ 等），
+          # 让 patch.sh 的 $script_dir 下能正确定位到所有补丁与资源
+          sudo cp -r -p "$GITHUB_WORKSPACE/"* /tmp/archlinux/tmp/wine-termux/
+
+          if [ ! -f /tmp/archlinux/tmp/wine-termux/patch.sh ]; then
             echo "❌ patch.sh not found in repository root!"
             exit 1
           fi
-          
-          if [ -f "$GITHUB_WORKSPACE/set-tkg-cfg.sh" ]; then
-            sudo cp "$GITHUB_WORKSPACE/set-tkg-cfg.sh" /tmp/archlinux/tmp/wine-termux/
-            echo "✅ Copied set-tkg-cfg.sh"
-          else
+          if [ ! -f /tmp/archlinux/tmp/wine-termux/set-tkg-cfg.sh ]; then
             echo "❌ set-tkg-cfg.sh not found in repository root!"
             exit 1
           fi
-          
+
           sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
           
           echo "Contents of /tmp/wine-termux:"
