@@ -45,8 +45,6 @@ diff -u b/server/esync.c b/server/esync.c
      if (shm_fd == -1)
          perror( "shm_open" );
  
-only in patch2:
-unchanged:
 --- ValveSoftware-winegit/dlls/ntdll/unix/esync.c	2025-08-27 13:09:14.000000000 +0800
 +++ b/dlls/ntdll/unix/esync.c	2025-08-27 13:46:52.361055541 +0800
 @@ -96,7 +96,7 @@
@@ -73,8 +71,6 @@ unchanged:
      {
          /* probably the server isn't running with WINEESYNC, tell the user and bail */
          if (errno == ENOENT)
-only in patch2:
-unchanged:
 --- ValveSoftware-winegit/programs/winebrowser/main.c	2025-08-27 13:09:17.000000000 +0800
 +++ b/programs/winebrowser/main.c	2025-08-27 14:31:13.480864623 +0800
 @@ -116,7 +116,8 @@
@@ -96,8 +92,6 @@ unchanged:
          "xdg-email\0"
          "mozilla-thunderbird\0"
          "thunderbird\0"
-only in patch2:
-unchanged:
 --- ValveSoftware-winegit/server/unicode.c	2025-08-27 13:08:56.000000000 +0800
 +++ b/server/unicode.c	2025-08-27 14:28:03.649303231 +0800
 @@ -313,7 +313,7 @@
