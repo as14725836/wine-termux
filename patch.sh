@@ -41,20 +41,22 @@ apply_custom_patches() {
     
     echo "找到 $patch_count 个补丁文件"
     
-    # 按顺序应用所有补丁
+    # 复制补丁到 wine-tkg-userpatches，由 non-makepkg-build.sh 在正确时机应用
+    local userpatches_dir="$1"
     for patch_file in "$patch_dir"/*.patch; do
         if [ -f "$patch_file" ]; then
             local patch_name=$(basename "$patch_file")
-            echo "  应用补丁: $patch_name"
-            if patch -p1 < "$patch_file" 2>&1; then
-                echo "  ✅ $patch_name 应用成功"
+            if [ -n "$userpatches_dir" ] && [ -d "$userpatches_dir" ]; then
+                echo "  复制补丁到 userpatches: $patch_name"
+                cp "$patch_file" "$userpatches_dir/"
+                echo "  ✅ $patch_name 已复制"
             else
-                echo "  ⚠️  $patch_name 应用失败（跳过）"
+                echo "  ⚠️  userpatches 目录无效，跳过 $patch_name"
             fi
         fi
     done
     
-    echo "=== 自定义补丁应用完成 ==="
+    echo "=== 自定义补丁处理完成 ==="
 }
 # ===========================================================
 
@@ -112,7 +114,7 @@ copy_patches() {
 add_tkg_mfdxgi() {
   if [[ -z $ENABLE_PROTON_MF ]] || [[ $ENABLE_PROTON_MF == false ]] || [[ $ENABLE_PROTON_MF == 0 ]]; then
 
-    ver=$2 # 10.14
+    ver="${2#wine-}" # 10.14
     major_ver=$(echo "$ver" | cut -d. -f1)
     minor_ver=$(echo "$ver" | cut -d. -f2)
 
@@ -140,7 +142,7 @@ wine-tkg)
     ;;
 wine-tkg-auto) 
     copy_patches wine-tkg-git-staging-ge $2 $3 || exit 1
-    add_tkg_mfdxgi
-    apply_custom_patches
+    add_tkg_mfdxgi $2 $3
+    apply_custom_patches $3
     ;;
 esac
