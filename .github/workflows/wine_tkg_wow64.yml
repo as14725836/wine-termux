@@ -248,56 +248,70 @@ jobs:
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
-          # ===================== winhlp32 bool 修复 hook 开始 =====================
-          # 仅 wine 9.x 需要（新 GCC 下 bool 是关键字）
+          # ===================== C 关键字变量名修复 hook 开始 =====================
+          # 仅 wine 9.x 需要（新 GCC 下 bool/true/false 是 C99 关键字）
           case "${{ steps.wine_tag.outputs.wine_ver }}" in
             9.*)
-              echo "=== 注入 winhlp32 bool 修复 hook（wine ${{ steps.wine_tag.outputs.wine_ver }}）==="
+              echo "=== 注入 C 关键字修复 hook（wine ${{ steps.wine_tag.outputs.wine_ver }}）==="
 
-              # 1) 把 _winhlp32_bool_fix 函数追加到 prepare.sh 末尾
-              cat >> "$PREPARE_SH" << 'WINHLPEOF'
+              # 1) 把 _c_keyword_fix 函数追加到 prepare.sh 末尾
+              cat >> "$PREPARE_SH" << 'KEYWORDFIXEOF'
 
           ########################################################################
-          # winhlp32 bool fix (auto-injected by CI)
+          # C keyword variable name fix (auto-injected by CI)
+          # 新 GCC 下 bool/true/false 是 C99 关键字，不能当变量名
           ########################################################################
-          _winhlp32_bool_fix() {
+          _c_keyword_fix() {
             local _src="${srcdir}/${_winesrcdir}"
             if [ ! -d "$_src" ]; then
-              warning "winhlp32 bool fix: source dir not found: $_src"
+              warning "c keyword fix: source dir not found: $_src"
               return 0
             fi
+
+            # winhlp32: BOOL bool;  ->  BOOL bBool;
             local _mf="$_src/programs/winhlp32/macro.h"
-            if [ ! -f "$_mf" ]; then
-              warning "winhlp32 bool fix: macro.h not found: $_mf"
-              return 0
+            if [ -f "$_mf" ]; then
+              msg2 "Applying winhlp32 bool fix in $_mf"
+              sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_mf"
+              grep -n 'bBool' "$_mf" && msg2 "winhlp32 bool fix done"
+            else
+              warning "winhlp32 macro.h not found: $_mf"
             fi
-            msg2 "Applying winhlp32 bool fix in $_mf"
-            sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_mf"
-            grep -n 'bBool' "$_mf" && msg2 "winhlp32 bool fix done"
+
+            # dpwsockx: BOOL true = TRUE;  ->  BOOL bTrue = TRUE;
+            local _df="$_src/dlls/dpwsockx/dpwsockx_main.c"
+            if [ -f "$_df" ]; then
+              msg2 "Applying dpwsockx true fix in $_df"
+              sed -i 's/BOOL[[:space:]]\+true[[:space:]]*=/BOOL bTrue =/' "$_df"
+              sed -i 's/\btrue\b/bTrue/g' "$_df"
+              grep -n 'bTrue' "$_df" && msg2 "dpwsockx true fix done"
+            else
+              warning "dpwsockx main.c not found: $_df"
+            fi
           }
           ########################################################################
-          WINHLPEOF
+          KEYWORDFIXEOF
 
-              # 2) 在 non-makepkg-build.sh 里 _termux_path_fix 之后插入 _winhlp32_bool_fix
+              # 2) 在 non-makepkg-build.sh 里 _termux_path_fix 之后插入 _c_keyword_fix
               awk '
                 /^[[:space:]]*_termux_path_fix[[:space:]]*$/ && !done {
                   print
-                  print "        _winhlp32_bool_fix"
+                  print "        _c_keyword_fix"
                   done=1
                   next
                 }
                 { print }
               ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
 
-              echo "===== winhlp32 hook check ====="
-              grep -n "_winhlp32_bool_fix" "$NMBS" || { echo "❌ winhlp32 hook injection failed"; exit 1; }
-              grep -n "_winhlp32_bool_fix" "$PREPARE_SH" || { echo "❌ winhlp32 hook function missing"; exit 1; }
+              echo "===== c keyword hook check ====="
+              grep -n "_c_keyword_fix" "$NMBS" || { echo "❌ c keyword hook injection failed"; exit 1; }
+              grep -n "_c_keyword_fix" "$PREPARE_SH" || { echo "❌ c keyword hook function missing"; exit 1; }
               ;;
             *)
-              echo "跳过 winhlp32 bool 修复（wine ${{ steps.wine_tag.outputs.wine_ver }} 不需要）"
+              echo "跳过 C 关键字修复（wine ${{ steps.wine_tag.outputs.wine_ver }} 不需要）"
               ;;
           esac
-          # ===================== winhlp32 bool 修复 hook 结束 =====================
+          # ===================== C 关键字变量名修复 hook 结束 =====================
 
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
