@@ -1,4 +1,5 @@
 export script_dir="$(dirname $(readlink -f "$0"))"
+
 proton_apply_patch() {
   if [[ -d $script_dir/$1/$2 ]]; then
     . $script_dir/$1/$2/___patch___.conf $3
@@ -70,7 +71,7 @@ add_tkg_mfdxgi() {
 }
 
 case $1 in
-proton) proton_apply_patch proton $2 || exit 1 ;;
+proton) proton_apply_patch proton $2 $3 || exit 1 ;;
 wine-tkg) wine_apply_patch wine-tkg-git-staging-ge $2 || exit 1
   add_tkg_mfdxgi ;;
 wine-tlg-auto) copy_patches wine-tkg-git-staging-ge $2 $3 || exit 1
