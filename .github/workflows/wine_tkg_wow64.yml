@@ -247,6 +247,32 @@ jobs:
           grep -n "_termux_path_fix" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
+
+          # ===================== winhlp32 bool 修复 =====================
+          # 仅 wine 9.x 需要（新 GCC 下 bool 是关键字）
+          case "${{ steps.wine_tag.outputs.wine_ver }}" in
+            9.*)
+              echo "=== 修复 winhlp32 bool 关键字冲突（wine ${{ steps.wine_tag.outputs.wine_ver }}）==="
+              _WINE_SRC="/tmp/wine-tkg-git/wine-tkg-git/wine-git"
+              if [ ! -f "$_WINE_SRC/programs/winhlp32/macro.h" ]; then
+                echo "⚠️ 默认路径未找到 macro.h，尝试搜索..."
+                _WINE_SRC=$(find /tmp/wine-tkg-git/wine-tkg-git -maxdepth 4 -type d -name "wine-git" 2>/dev/null | head -n1)
+                echo "找到 wine-git: $_WINE_SRC"
+              fi
+              if [ -f "$_WINE_SRC/programs/winhlp32/macro.h" ]; then
+                sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_WINE_SRC/programs/winhlp32/macro.h"
+                echo "✅ 已修改 $(grep -n 'bBool' "$_WINE_SRC/programs/winhlp32/macro.h")"
+              else
+                echo "❌ 未找到 $_WINE_SRC/programs/winhlp32/macro.h"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "跳过 winhlp32 bool 修复（wine ${{ steps.wine_tag.outputs.wine_ver }} 不需要）"
+              ;;
+          esac
+          # ===================== winhlp32 bool 修复结束 =====================
+
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
           cd /tmp/output/
