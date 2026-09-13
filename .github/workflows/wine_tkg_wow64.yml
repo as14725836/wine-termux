@@ -25,15 +25,6 @@ on:
         required: false
         type: boolean
         default: true
-      patch_source:
-        description: "选择要应用的自定义补丁目录"
-        required: false
-        type: choice
-        default: "none"
-        options:
-          - none
-          - patch
-          - patch11.16
   schedule:
     - cron: "0 1 * * *"
 
@@ -115,7 +106,6 @@ jobs:
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
           echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
-          echo "patch_source=${{ github.event.inputs.patch_source || 'none' }}" >> "$GITHUB_OUTPUT"
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
         run: |
@@ -184,7 +174,6 @@ jobs:
           export USE_CACHE=1
           export ENABLE_PROTON_MF=${{ steps.wine-mirror.outputs.enable_mf }}
           export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
-          export PATCH_SOURCE=${{ steps.wine_tag.outputs.patch_source }}
           cd /tmp/wine-tkg-git/wine-tkg-git/
           bash -x /tmp/wine-termux/patch.sh wine-tkg-auto "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
           bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
