@@ -248,30 +248,56 @@ jobs:
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
-          # ===================== winhlp32 bool 修复 =====================
+          # ===================== winhlp32 bool 修复 hook 开始 =====================
           # 仅 wine 9.x 需要（新 GCC 下 bool 是关键字）
           case "${{ steps.wine_tag.outputs.wine_ver }}" in
             9.*)
-              echo "=== 修复 winhlp32 bool 关键字冲突（wine ${{ steps.wine_tag.outputs.wine_ver }}）==="
-              _WINE_SRC="/tmp/wine-tkg-git/wine-tkg-git/wine-git"
-              if [ ! -f "$_WINE_SRC/programs/winhlp32/macro.h" ]; then
-                echo "⚠️ 默认路径未找到 macro.h，尝试搜索..."
-                _WINE_SRC=$(find /tmp/wine-tkg-git/wine-tkg-git -maxdepth 4 -type d -name "wine-git" 2>/dev/null | head -n1)
-                echo "找到 wine-git: $_WINE_SRC"
-              fi
-              if [ -f "$_WINE_SRC/programs/winhlp32/macro.h" ]; then
-                sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_WINE_SRC/programs/winhlp32/macro.h"
-                echo "✅ 已修改 $(grep -n 'bBool' "$_WINE_SRC/programs/winhlp32/macro.h")"
-              else
-                echo "❌ 未找到 $_WINE_SRC/programs/winhlp32/macro.h"
-                exit 1
-              fi
+              echo "=== 注入 winhlp32 bool 修复 hook（wine ${{ steps.wine_tag.outputs.wine_ver }}）==="
+
+              # 1) 把 _winhlp32_bool_fix 函数追加到 prepare.sh 末尾
+              cat >> "$PREPARE_SH" << 'WINHLPEOF'
+
+          ########################################################################
+          # winhlp32 bool fix (auto-injected by CI)
+          ########################################################################
+          _winhlp32_bool_fix() {
+            local _src="${srcdir}/${_winesrcdir}"
+            if [ ! -d "$_src" ]; then
+              warning "winhlp32 bool fix: source dir not found: $_src"
+              return 0
+            fi
+            local _mf="$_src/programs/winhlp32/macro.h"
+            if [ ! -f "$_mf" ]; then
+              warning "winhlp32 bool fix: macro.h not found: $_mf"
+              return 0
+            fi
+            msg2 "Applying winhlp32 bool fix in $_mf"
+            sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_mf"
+            grep -n 'bBool' "$_mf" && msg2 "winhlp32 bool fix done"
+          }
+          ########################################################################
+          WINHLPEOF
+
+              # 2) 在 non-makepkg-build.sh 里 _termux_path_fix 之后插入 _winhlp32_bool_fix
+              awk '
+                /^[[:space:]]*_termux_path_fix[[:space:]]*$/ && !done {
+                  print
+                  print "        _winhlp32_bool_fix"
+                  done=1
+                  next
+                }
+                { print }
+              ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+
+              echo "===== winhlp32 hook check ====="
+              grep -n "_winhlp32_bool_fix" "$NMBS" || { echo "❌ winhlp32 hook injection failed"; exit 1; }
+              grep -n "_winhlp32_bool_fix" "$PREPARE_SH" || { echo "❌ winhlp32 hook function missing"; exit 1; }
               ;;
             *)
               echo "跳过 winhlp32 bool 修复（wine ${{ steps.wine_tag.outputs.wine_ver }} 不需要）"
               ;;
           esac
-          # ===================== winhlp32 bool 修复结束 =====================
+          # ===================== winhlp32 bool 修复 hook 结束 =====================
 
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
