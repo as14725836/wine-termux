@@ -5,7 +5,6 @@ permissions:
   packages: write
 
 on:
-  # 手动触发保留，并允许自定义 Proton tag
   workflow_dispatch:
     inputs:
       tag:
@@ -13,9 +12,8 @@ on:
         required: false
         type: string
 
-  # 定时检查 Proton 仓库的最新 release
   schedule:
-    - cron: '0 0 * * *'   # 每日 00:00 检查一次（UTC 时间）
+    - cron: '0 0 * * *'
 
 jobs:
   BCC:
@@ -27,7 +25,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 使用 cache 保存上一次看到的 tag
       - name: Restore last Proton release tag from cache
         id: cache-tag
         uses: actions/cache@v4
@@ -67,7 +64,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # 手动触发时无论是否与上次相同 tag 都执行
             echo "Manual dispatch, force build."
             echo "new_release=true" >> "$GITHUB_OUTPUT"
           else
@@ -83,10 +79,9 @@ jobs:
         if: steps.need_build.outputs.new_release == 'true'
         run: |
           proton_tag="${{ steps.proton.outputs.tag }}"
-          # proton_tag 示例：proton-10.0-4
-          proton_rel="${proton_tag#proton-}"   # 10.0-4
-          version="${proton_rel%-*}"          # 10.0
-          wine_tag="proton-wine-${proton_rel}" # proton-wine-10.0-4
+          proton_rel="${proton_tag#proton-}"
+          version="${proton_rel%-*}"
+          wine_tag="proton-wine-${proton_rel}"
 
           echo "Proton tag: $proton_tag"
           echo "Proton release: $proton_rel"
@@ -98,7 +93,6 @@ jobs:
           echo "version=$version"         >> "$GITHUB_OUTPUT"
           echo "wine_tag=$wine_tag"       >> "$GITHUB_OUTPUT"
 
-      # 只有检测到新 release（或手动触发）才执行你的脚本
       - name: Clone project on new Proton release
         if: steps.need_build.outputs.new_release == 'true'
         run: |
@@ -112,45 +106,87 @@ jobs:
             fetchJobs = `nproc`
           EOF
 
+          # 1) clone Proton wine 源码
           git clone -b "${{ steps.wine_tag.outputs.wine_tag }}" https://github.com/ValveSoftware/wine.git wine-src
 
-          # 修复 termux 路径问题
+          # 2) 修复 termux 路径问题
           echo "修复 Termux 路径问题..."
           cd wine-src
-          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.in" -o -name "*.spec" \) -exec grep -l "/tmp" {} \; | xargs sed -i 's|/tmp/|/data/data/com.termux/files/usr/tmp/|g'
-          find server -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} +
-          find . -name "file.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} +
-          find . -name "loader.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} +
-          find . -name "server.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} +
+          find . -type f \( -name "*.c" -o -name "*.h" -o -name "*.in" -o -name "*.spec" \) -exec grep -l "/tmp" {} \; | xargs -r sed -i 's|/tmp/|/data/data/com.termux/files/usr/tmp/|g'
+          find server -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} + 2>/dev/null || true
+          find . -name "file.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} + 2>/dev/null || true
+          find . -name "loader.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} + 2>/dev/null || true
+          find . -name "server.c" -exec sed -i 's|"/tmp"|"/data/data/com.termux/files/usr/tmp"|g' {} + 2>/dev/null || true
+
+          # 3) README 官方修复：撤销引入新版 FFmpeg API 依赖的 winedmo 提交
+          echo "=== 修复 winedmo FFmpeg 构建错误（README 官方方案）==="
+          if git log --oneline | grep -q 063a29bc8ba; then
+            git show 063a29bc8ba | git apply -R && echo "✅ reverted 063a29bc8ba" || echo "⚠️ revert 063a29bc8ba failed"
+          else
+            echo "ℹ️ commit 063a29bc8ba 未出现在此 tag，跳过"
+          fi
+
+          # 4) README 官方修复：OpenCL stub dll 构建错误
+          echo "=== 修复 OpenCL 构建错误（README 官方方案）==="
+          if git log --oneline | grep -q dd8d73ba895; then
+            git show dd8d73ba895 | git apply -R && echo "✅ reverted dd8d73ba895" || echo "⚠️ revert dd8d73ba895 failed"
+          else
+            echo "ℹ️ commit dd8d73ba895 未出现在此 tag，跳过"
+          fi
+
           cd ..
+
+          # 5) 下载 BCC rootfs
           cd /tmp
-
           aria2c -s$(nproc) -x$(nproc) https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
-
           sudo tar xf wine-bcc.tar.xz || exit 1
-          sudo mv $GITHUB_WORKSPACE/wine-src archlinux/tmp/
-          sudo cp -r -p $GITHUB_WORKSPACE/ archlinux/tmp/
 
-          # 为 rootfs 内的 ccache 目录预留位置（/tmp/archlinux/root/.cache/ccache）
+          # 6) 把 wine 源码和构建所需文件放进 chroot
+          sudo mv $GITHUB_WORKSPACE/wine-src archlinux/tmp/
+
+          # 只复制构建真正需要的文件到 chroot:/tmp/
+          sudo cp "$GITHUB_WORKSPACE/x64.sh"   archlinux/tmp/
+          sudo cp "$GITHUB_WORKSPACE/patch.sh" archlinux/tmp/
+          if [ -d "$GITHUB_WORKSPACE/proton" ]; then
+            sudo cp -r "$GITHUB_WORKSPACE/proton" archlinux/tmp/
+          fi
+          if [ -d "$GITHUB_WORKSPACE/Wine_Builds" ]; then
+            sudo cp -r "$GITHUB_WORKSPACE/Wine_Builds" archlinux/tmp/
+          fi
+          sudo chmod +x archlinux/tmp/x64.sh archlinux/tmp/patch.sh
+
+          # 7) ccache 目录
           sudo mkdir -p archlinux/root/.cache/ccache
           sudo chmod -R 777 archlinux/root/.cache
 
+          # 8) 生成 chroot 内的 build-wine.sh
           cat > build-wine.sh << EOF
           #!/bin/bash
-          [[ -d /tmp/wine-termux ]] || exit 1
+          set -e
           cd /tmp/wine-src
+
+          # 编译环境（x64.sh 会 export arg=(...)）
           export USE_CACHE=1
-          source /tmp/wine-termux/x64.sh
-          bash -x /tmp/wine-termux/patch.sh proton ${{ steps.wine_tag.outputs.version }} ${{ steps.wine_tag.outputs.wine_tag }} || exit 1
+          source /tmp/x64.sh
+
+          # 应用 proton 补丁
+          bash -x /tmp/patch.sh proton ${{ steps.wine_tag.outputs.version }} ${{ steps.wine_tag.outputs.wine_tag }} || exit 1
+
+          # 若 x64.sh 里没有 --without-winedmo，这里再兜底一次
+          if ! printf '%s\n' "\${arg[@]}" | grep -q -- '--without-winedmo'; then
+            echo "⚠️ arg 中无 --without-winedmo，追加"
+            arg+=(--without-winedmo)
+          fi
+
           ./autogen.sh || exit 1
-          ./configure \${arg[@]} --prefix=/tmp/${{ steps.wine_tag.outputs.wine_tag }} || exit 1
-          make -j$(nproc) || exit 1
+          ./configure "\${arg[@]}" --prefix=/tmp/${{ steps.wine_tag.outputs.wine_tag }} || exit 1
+          make -j\$(nproc) || exit 1
           make install || exit 1
           cd /tmp
-          tar -I 'xz -T$(nproc)' -cf ${{ steps.wine_tag.outputs.wine_tag }}.tar.xz ${{ steps.wine_tag.outputs.wine_tag }}/
+          tar -I 'xz -T\$(nproc)' -cf ${{ steps.wine_tag.outputs.wine_tag }}.tar.xz ${{ steps.wine_tag.outputs.wine_tag }}/
           EOF
 
-          sudo chmod 777 build-wine.sh
+          sudo chmod +x build-wine.sh
           sudo cp -r -p build-wine.sh archlinux/bin/
 
       - name: Cache ccache directory in rootfs
@@ -182,13 +218,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.wine_tag.outputs.wine_tag }}          # 例如：proton-wine-10.0-4
-          name: Proton Wine ${{ steps.wine_tag.outputs.proton_rel }} # 例如：Proton Wine 10.0-4
+          tag_name: ${{ steps.wine_tag.outputs.wine_tag }}
+          name: Proton Wine ${{ steps.wine_tag.outputs.proton_rel }}
           body: |
             源码修改查看此仓库补丁，这是非TkG版本的原版proton wine编译。
           files: /tmp/archlinux/tmp/${{ steps.wine_tag.outputs.wine_tag }}.tar.xz
 
-      # 更新缓存里的 last_tag（保持和 latest 对齐）
       - name: Save current tag to cache file
         if: steps.need_build.outputs.new_release == 'true'
         run: |
@@ -200,4 +235,4 @@ jobs:
         with:
           path: .proton_last_tag
           key: proton-last-tag
-
+          
