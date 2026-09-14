@@ -268,23 +268,22 @@ jobs:
               return 0
             fi
 
-            # winhlp32: BOOL bool;  ->  BOOL bBool;
-            local _mf="$_src/programs/winhlp32/macro.h"
-            if [ -f "$_mf" ]; then
-              msg2 "Applying winhlp32 bool fix in $_mf"
-              sed -i 's/BOOL[[:space:]]\+bool;/BOOL bBool;/' "$_mf"
-              grep -n 'bBool' "$_mf" && msg2 "winhlp32 bool fix done"
+            # dlls/jscript/bool.c: bool 作为变量名 -> bool_obj
+            local _jf="$_src/dlls/jscript/bool.c"
+            if [ -f "$_jf" ]; then
+              msg2 "Applying jscript bool fix in $_jf"
+              sed -i -E 's/\bbool\b/bool_obj/g' "$_jf"
+              grep -n '\bbool_obj\b' "$_jf" | head -n 5 && msg2 "jscript bool fix done"
             else
-              warning "winhlp32 macro.h not found: $_mf"
+              warning "jscript bool.c not found: $_jf"
             fi
 
-            # dpwsockx: BOOL true = TRUE;  ->  BOOL bTrue = TRUE;
+            # dlls/dpwsockx/dpwsockx_main.c: true 作为变量名 -> bTrue
             local _df="$_src/dlls/dpwsockx/dpwsockx_main.c"
             if [ -f "$_df" ]; then
               msg2 "Applying dpwsockx true fix in $_df"
-              sed -i 's/BOOL[[:space:]]\+true[[:space:]]*=/BOOL bTrue =/' "$_df"
-              sed -i 's/\btrue\b/bTrue/g' "$_df"
-              grep -n 'bTrue' "$_df" && msg2 "dpwsockx true fix done"
+              sed -i -E 's/\btrue\b/bTrue/g' "$_df"
+              grep -n '\bbTrue\b' "$_df" && msg2 "dpwsockx true fix done"
             else
               warning "dpwsockx main.c not found: $_df"
             fi
