@@ -299,6 +299,16 @@ jobs:
             else
               warning "winhlp32 dir not found: $_wd"
             fi
+
+            # dlls/msi/cond.y: BOOL bool; + %type <bool> -> bBool
+            local _my="$_src/dlls/msi/cond.y"
+            if [ -f "$_my" ]; then
+              msg2 "Applying msi cond.y bool fix in $_my"
+              sed -i -E 's/\bbool\b/bBool/g' "$_my"
+              grep -n '\bbBool\b' "$_my" | head -n 5 && msg2 "msi cond.y bool fix done"
+            else
+              warning "msi cond.y not found: $_my"
+            fi
           }
           ########################################################################
           KEYWORDFIXEOF
