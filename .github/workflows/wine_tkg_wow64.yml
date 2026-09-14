@@ -287,6 +287,18 @@ jobs:
             else
               warning "dpwsockx main.c not found: $_df"
             fi
+
+            # programs/winhlp32/: BOOL bool; 成员名 -> bBool（含所有访问处）
+            local _wd="$_src/programs/winhlp32"
+            if [ -d "$_wd" ]; then
+              msg2 "Applying winhlp32 bool fix in $_wd"
+              grep -rlwE '\bbool\b' "$_wd" --include='*.c' --include='*.h' \
+                | xargs -r sed -i -E 's/\bbool\b/bBool/g'
+              grep -rnwE '\bbBool\b' "$_wd" --include='*.c' --include='*.h' | head -n 5 \
+                && msg2 "winhlp32 bool fix done"
+            else
+              warning "winhlp32 dir not found: $_wd"
+            fi
           }
           ########################################################################
           KEYWORDFIXEOF
