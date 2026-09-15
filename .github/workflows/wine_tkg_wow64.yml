@@ -248,6 +248,49 @@ jobs:
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
+          # ===================== mfplat DXGI device manager patch 开始 =====================
+          MFPLAT_PATCH_URL="https://raw.githubusercontent.com/as14725836/wine-termux/main/wine_do_not_create_dxgi_device_manager2.patch"
+          MFPLAT_PATCH_FILE="/tmp/wine-termux/wine_do_not_create_dxgi_device_manager2.patch"
+          WINE_SRC_DIR="/tmp/wine-tkg/src/wine-git"
+
+          if [ ! -d "$WINE_SRC_DIR" ]; then
+            WINE_SRC_DIR="$(find /tmp -maxdepth 8 -type d -path '*/wine-tkg/src/wine-git' 2>/dev/null | head -n 1)"
+          fi
+
+          if [ -z "$WINE_SRC_DIR" ] || [ ! -d "$WINE_SRC_DIR" ]; then
+            echo "❌ 未找到 wine 源码目录，跳过 mfplat 补丁"
+          else
+            echo "✅ Wine 源码目录: $WINE_SRC_DIR"
+
+            if [ -f "$MFPLAT_PATCH_FILE" ]; then
+              echo "✅ 使用已存在的补丁文件: $MFPLAT_PATCH_FILE"
+            else
+              echo "⬇️ 下载补丁: $MFPLAT_PATCH_URL"
+              if wget -O "$MFPLAT_PATCH_FILE" "$MFPLAT_PATCH_URL"; then
+                echo "✅ 补丁下载成功"
+              else
+                echo "⚠️ 补丁下载失败，跳过"
+                MFPLAT_PATCH_FILE=""
+              fi
+            fi
+
+            if [ -n "$MFPLAT_PATCH_FILE" ] && [ -f "$MFPLAT_PATCH_FILE" ]; then
+              cd "$WINE_SRC_DIR"
+              if [ -f "dlls/mfplat/main.c" ]; then
+                echo "找到目标文件 dlls/mfplat/main.c，准备应用补丁..."
+                if patch -p1 --forward < "$MFPLAT_PATCH_FILE"; then
+                  echo "✅ 补丁应用成功"
+                else
+                  echo "⚠️ 补丁应用失败或已应用（上下文不符/已合并），继续编译"
+                fi
+              else
+                echo "⚠️ 未找到 dlls/mfplat/main.c，跳过补丁"
+              fi
+              cd - >/dev/null
+            fi
+          fi
+          # ===================== mfplat DXGI device manager patch 结束 =====================
+
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
           cd /tmp/output/
