@@ -64,6 +64,9 @@ jobs:
           ls /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin | grep -E '^arm64ec-w64-mingw32-(clang|gcc)$'
           ls /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin | grep -E '^x86_64-w64-mingw32-(clang|gcc)$'
           /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin/arm64ec-w64-mingw32-clang --version | head -2 || true
+          echo "--- arm64ec predefined macros (aarch64/x86_64/arm64ec) ---"
+          arm64ec-w64-mingw32-clang -dM -E -x c /dev/null 2>/dev/null | grep -E '__aarch64__|__x86_64__|__arm64ec__|_M_ARM64EC|_M_AMD64|_M_ARM64' | sort
+          echo "--- end macros ---"
 
       - name: Stage user patches
         run: |
@@ -236,6 +239,18 @@ jobs:
               sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
               echo "patched PACKAGE_VERSION=$_wv into cross config.h"
             fi
+            # --- winnt.h: make the ARM64 CONTEXT block arm64ec-aware ---
+            # llvm-mingw documents arm64ec: clang defines __arm64ec__ AND __x86_64__ AND __aarch64__.
+            # wine 11.18 winnt.h has bare "#ifdef __aarch64__" (ARM64 types) and
+            # "#ifdef __x86_64__" (AMD64 types); both fire -> conflicting typedefs.
+            if grep -q "^#ifdef __aarch64__$" "$WORK/wine/include/winnt.h"; then
+              sed -i 's|^#ifdef __aarch64__$|#if defined(__aarch64__) \&\& !defined(__arm64ec__)|' "$WORK/wine/include/winnt.h"
+            fi
+            if grep -q "defined(__aarch64__) && !defined(__arm64ec__)" "$WORK/wine/include/winnt.h"; then
+              echo "winnt.h arm64ec fix: applied"
+            else
+              echo "WARN: winnt.h arm64ec fix NOT applied"
+            fi
           echo "--- PE arch detection ---"
           grep -iE 'arm64ec|x86_64-w64|mingw|PE ' /tmp/configure.log | head -25
           echo "--- toolchain summary ---"
@@ -245,7 +260,12 @@ jobs:
           make -j"$(nproc)" > /tmp/make.log 2>&1
           rc=$?
           echo "make rc=$rc"
-          tail -80 /tmp/make.log
+            echo "--- context around first error (includes compile command) ---"
+            grep -n -B12 'error:' /tmp/make.log 2>/dev/null | head -70 || true
+            echo "--- all error lines ---"
+            grep -n 'error:' /tmp/make.log 2>/dev/null | head -25 || true
+            echo "--- tail of make.log ---"
+            tail -60 /tmp/make.log
           if [ $rc -ne 0 ]; then exit 1; fi
 
           echo "===== 5) install ====="
