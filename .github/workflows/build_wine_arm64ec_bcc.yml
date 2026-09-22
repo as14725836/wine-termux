@@ -300,6 +300,16 @@ jobs:
             echo "--- winnt.h conditions AFTER ---"
             grep -nE "^(#if|#elif).*(__aarch64__|__x86_64__)" "$_W" | head -16
             echo "--- winnt.h lines 2014 + 8076 ---"
+            echo "--- winnt.h per-block __x86_64__ conditions BEFORE ---"
+            awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
+            # 2104 (DISPATCHER_CONTEXT) and 2534 (RtlIsEcCode) MUST stay active on arm64ec;
+            # only 1420 (CONTEXT aliases) and 8076 (x86 asm) are arm64ec-excluded.
+            sed -i '2104s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
+            sed -i '2534s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
+            echo "--- winnt.h per-block __x86_64__ conditions AFTER ---"
+            awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
+            echo "--- lines 2104-2107 / 2534-2536 ---"
+            awk 'NR>=2104 && NR<=2107 || NR>=2534 && NR<=2536' "$_W"
             awk 'NR==2014 || NR==8076' "$_W"
             _s="#if defined(__x86_64__) && !defined(__aarch64__) && !defined(__arm64ec__)"
             _n1=$(grep -cF "$_s" "$_W" || true)
