@@ -325,18 +325,31 @@ jobs:
             _n1=$(grep -cF "$_s" "$_W" || true)
             _n2=$(grep -c "defined(__aarch64__) || defined(__arm64ec__)" "$_W" || true)
             echo "winnt.h fix: shielded $_n1 x86_64 block(s); ARM64 conditions: $_n2"
-            # --- winnt.h needs __aarch64__ on the PE side too ---
-            # wine configure reports "we need to define __aarch64__: yes" (WINE_CHECK_DEFINE)
-            # but that -D only lands in the unix-side CFLAGS; the PE compilers do not get it,
-            # so winnt.h's "#ifdef __aarch64__" ARM64 CONTEXT block never fires.
-            for _a in aarch64 arm64ec; do
-              if grep -q "^${_a}_EXTRACFLAGS = " Makefile; then
-                sed -i "s|^${_a}_EXTRACFLAGS = |${_a}_EXTRACFLAGS = -D__aarch64__ |" Makefile
-              else
-                sed -i "s|^${_a}_CFLAGS = |${_a}_CFLAGS = -D__aarch64__ |" Makefile
+            # --- PE-side arch macros ---
+            # llvm-mingw does not predefine __aarch64__ / __arm64ec__ for its PE targets,
+            # and ${arch}_EXTRACFLAGS is not consumed by the PE compile rules; the flags
+            # that really reach the compiler are ${arch}_CFLAGS (see the -g -O2 in the log).
+            # Each arch needs a different macro:
+            #   aarch64 PE -> -D__aarch64__
+            #   arm64ec PE -> -D__arm64ec__   (NOT __aarch64__, that would skip the AMD64
+            #                                  CONTEXT block wine expects for arm64ec)
+            for _pair in "aarch64:__aarch64__" "arm64ec:__arm64ec__"; do
+              _a="${_pair%%:*}"; _m="${_pair##*:}"
+              sed -i "s@^${_a}_EXTRACFLAGS = -D__aarch64__ @${_a}_EXTRACFLAGS = @" Makefile
+              sed -i "s@^${_a}_EXTRACFLAGS = -D__arm64ec__ @${_a}_EXTRACFLAGS = @" Makefile
+              if sed -n "s@^${_a}_CFLAGS = @@p" Makefile | grep -q -- "-D${_m}"; then :; else
+                sed -i "s@^${_a}_CFLAGS = @${_a}_CFLAGS = -D${_m} @" Makefile
               fi
             done
-            grep -E "^(aarch64|arm64ec)_(EXTRACFLAGS|CFLAGS) *=" Makefile
+            echo "--- arch CFLAGS/EXTRACFLAGS now ---"
+            grep -E "^(aarch64|arm64ec|i386|x86_64)_(CFLAGS|EXTRACFLAGS) *=" Makefile | head -8
+            echo "--- probe: does arm64ec clang define __arm64ec__ ? ---"
+            printf '#ifdef __arm64ec__\nint ok;\n#else\n#error __arm64ec__ NOT defined\n#endif\n' > /tmp/m64ec.c
+            if arm64ec-w64-mingw32-clang -c /tmp/m64ec.c -o /tmp/m64ec.o 2>/tmp/m64ec.err; then
+              echo "__arm64ec__ IS defined by clang"
+            else
+              echo "__arm64ec__ NOT defined by clang:"; head -3 /tmp/m64ec.err
+            fi
           echo "--- PE arch detection ---"
           grep -iE 'arm64ec|x86_64-w64|mingw|PE ' /tmp/configure.log | head -25
           echo "--- toolchain summary ---"
