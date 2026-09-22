@@ -101,6 +101,14 @@ jobs:
           echo "===== 0) toolchain ====="
           arm64ec-w64-mingw32-clang --version | head -2 || { echo "FATAL: arm64ec clang missing"; exit 1; }
           aarch64-linux-gnu-gcc --version | head -1
+          # ensure host-prefixed cross g++ (wine configure needs it)
+          if ! command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
+            echo "installing g++-aarch64-linux-gnu ..."
+            apt-get update -qq > /tmp/apt-cross.log 2>&1
+            apt-get install -y -qq g++-aarch64-linux-gnu >> /tmp/apt-cross.log 2>&1
+            tail -5 /tmp/apt-cross.log
+          fi
+          aarch64-linux-gnu-g++ --version | head -1 || echo "WARN: cross g++ missing"
 
           echo "===== 1) wine source: $WINE_BRANCH ====="
           if [ ! -d wine/.git ]; then
@@ -124,6 +132,25 @@ jobs:
             find . -name '*.rej'
           fi
 
+          echo "===== 2.5) native wine-tools (for x86_64 build host) ====="
+          TOOLS_DIR="$WORK/wine-tools"
+          if [ ! -x "$TOOLS_DIR/tools/winebuild/winebuild" ]; then
+            rm -rf "$TOOLS_DIR"
+            mkdir -p "$TOOLS_DIR"
+            cd "$TOOLS_DIR" || exit 1
+            "$WORK/wine/configure" --disable-tests > /tmp/tools-configure.log 2>&1
+            rc=$?
+            echo "tools configure rc=$rc"
+            tail -25 /tmp/tools-configure.log
+            if [ $rc -ne 0 ]; then exit 1; fi
+            make -C tools -j"$(nproc)" > /tmp/tools-make.log 2>&1
+            rc=$?
+            echo "tools make rc=$rc"
+            tail -40 /tmp/tools-make.log
+            if [ $rc -ne 0 ]; then exit 1; fi
+          fi
+          ls -la "$TOOLS_DIR/tools/winebuild/winebuild" || exit 1
+
           echo "===== 3) configure ====="
           BUILD_DIR="$WORK/build-$ARCHS"
           rm -rf "$BUILD_DIR"
@@ -133,6 +160,7 @@ jobs:
             --host=aarch64-linux-gnu \
             --enable-archs="$ARCHS" \
             --with-mingw=llvm-mingw \
+            --with-wine-tools="$TOOLS_DIR" \
             --prefix=/opt/wine-arm64ec \
             --disable-tests \
             --without-capi --without-cups --without-dbus --without-gstreamer \
