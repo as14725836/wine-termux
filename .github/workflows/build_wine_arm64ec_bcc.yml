@@ -301,6 +301,16 @@ jobs:
             grep -nE "^(#if|#elif).*(__aarch64__|__x86_64__)" "$_W" | head -16
             echo "--- winnt.h lines 2014 + 8076 ---"
             echo "--- winnt.h per-block __x86_64__ conditions BEFORE ---"
+            # FINAL: restore wine native semantics.
+            #  arm64ec must NOT take the ARM64 definitions (wine uses AMD64 CONTEXT there
+            #  and defines DISPATCHER_CONTEXT / DISPATCHER_CONTEXT_ARM64EC separately).
+            #  So: 2014 back to "#ifdef __aarch64__"; 1420 becomes x86_64-and-not-aarch64.
+            sed -i 's@^#if defined(__aarch64__) || defined(__arm64ec__)$@#ifdef __aarch64__@' "$_W"
+            sed -i '1420s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
+            echo "--- winnt.h FINAL conditions ---"
+            echo "2014:"; awk 'NR==2014' "$_W"
+            echo "1420 / 2104 / 2534 / 8076:"; awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
+            echo "2030:"; awk 'NR==2030' "$_W"
             awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
             # 2104 (DISPATCHER_CONTEXT) and 2534 (RtlIsEcCode) MUST stay active on arm64ec;
             # only 1420 (CONTEXT aliases) and 8076 (x86 asm) are arm64ec-excluded.
