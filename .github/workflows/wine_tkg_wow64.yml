@@ -255,6 +255,38 @@ jobs:
               fi
             fi
             # ---- mfplat patch end ----
+            # ---- adapted-11.18 user patches ----
+            for _up in 0060-quartz-implement-colour-filter.patch \
+                       0061-qasf-deliver-compressed-asf-streams.patch \
+                       termux-dns-fix.patch; do
+              local _up_file="/tmp/wine-termux/$_up"
+              local _up_url="https://raw.githubusercontent.com/as14725836/wine-termux/main/$_up"
+              if [ ! -f "$_up_file" ]; then
+                msg2 "Downloading userpatch $_up"
+                if ! wget -O "$_up_file" "$_up_url"; then
+                  warning "userpatch download failed: $_up"
+                  continue
+                fi
+              fi
+              msg2 "Applying userpatch $_up"
+              if patch -p1 --forward --no-backup-if-mismatch < "$_up_file"; then
+                msg2 "userpatch $_up applied OK"
+              else
+                warning "!!! userpatch $_up FAILED or already applied"
+              fi
+            done
+            
+            # --- .rej hard check ---
+            if find . -name '*.rej' | head -5 | grep -q .; then
+              warning "!!! .rej files detected:"
+              find . -name '*.rej'
+            fi
+            
+            # --- self check (visible in log) ---
+            msg2 "self-check colour.c: $(ls dlls/quartz/colour.c 2>/dev/null || echo MISSING)"
+            msg2 "self-check dns: $(grep -c init_dns_config dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
+            msg2 "self-check mfplat: $(grep -c resolver_create_default_handler dlls/mfplat/main.c 2>/dev/null || echo 0)"
+            # ---- user patches end ----
 
             popd &>/dev/null
             msg2 "Termux path fix done"
