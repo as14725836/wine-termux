@@ -171,10 +171,20 @@ jobs:
             echo "tools make rc=$rc"
             tail -40 /tmp/tools-make.log
             if [ $rc -ne 0 ]; then exit 1; fi
+            # wrc is a build-host tool and locates nls relative to its own path:
+            #   $TOOLS_DIR/tools/wrc/wrc  ->  $TOOLS_DIR/nls
+            # The wine-tools tree has no nls/, so wrc fails with "unable to load locale.nls".
+            make -j"$(nproc)" nls/ > /tmp/tools-nls.log 2>&1 || true
+            if [ ! -f nls/locale.nls ]; then
+              echo "make nls/ did not produce locale.nls; copying from source tree"
+              mkdir -p nls
+              cp -a "$WORK/wine/nls/." nls/
+            fi
+            ls -la nls/locale.nls
           fi
           _missing=""
-          for _t in tools/makedep tools/winebuild/winebuild tools/widl/widl tools/wrc/wrc; do
-            [ -x "$TOOLS_DIR/$_t" ] || _missing="$_missing $_t"
+          for _t in tools/makedep tools/winebuild/winebuild tools/widl/widl tools/wrc/wrc nls/locale.nls; do
+            if [ -f "$TOOLS_DIR/$_t" ]; then :; elif [ -x "$TOOLS_DIR/$_t" ]; then :; else _missing="$_missing $_t"; fi
           done
           if [ -n "$_missing" ]; then
             echo "!!! missing wine tools:$_missing"
