@@ -98,7 +98,7 @@ jobs:
         run: |
           wine_tag="${{ steps.wine-mirror.outputs.tag }}"
           wine_ver="${wine_tag#wine-}"
-          pkg_name=""
+          pkg_name="dxgi"
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
           fi
