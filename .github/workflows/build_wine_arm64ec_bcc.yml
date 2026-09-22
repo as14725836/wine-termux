@@ -239,15 +239,20 @@ jobs:
               sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
               echo "patched PACKAGE_VERSION=$_wv into cross config.h"
             fi
-            # --- winnt.h: make the ARM64 CONTEXT block arm64ec-aware ---
-            # llvm-mingw documents arm64ec: clang defines __arm64ec__ AND __x86_64__ AND __aarch64__.
-            # wine 11.18 winnt.h has bare "#ifdef __aarch64__" (ARM64 types) and
-            # "#ifdef __x86_64__" (AMD64 types); both fire -> conflicting typedefs.
-            if grep -q "^#ifdef __aarch64__$" "$WORK/wine/include/winnt.h"; then
-              sed -i 's|^#ifdef __aarch64__$|#if defined(__aarch64__) \&\& !defined(__arm64ec__)|' "$WORK/wine/include/winnt.h"
-            fi
-            if grep -q "defined(__aarch64__) && !defined(__arm64ec__)" "$WORK/wine/include/winnt.h"; then
-              echo "winnt.h arm64ec fix: applied"
+            # --- winnt.h: arm64ec compatibility ---
+            # llvm-mingw arm64ec clang defines __x86_64__ AND __aarch64__ AND __arm64ec__;
+            # wine configure additionally adds -D__aarch64__ (WINE_CHECK_DEFINE).
+            # winnt.h has bare "#ifdef __x86_64__" (AMD64 types) and "#ifdef __aarch64__"
+            # (ARM64 types) blocks; both fire -> conflicting CONTEXT/RUNTIME_FUNCTION.
+            #
+            # Under arm64ec wine wants the ARM64 types, so shield the __x86_64__ blocks.
+            # (First undo the previous, inverted fix on the __aarch64__ block.)
+            sed -i "s|^#if defined(__aarch64__) && !defined(__arm64ec__)$|#ifdef __aarch64__|" "$WORK/wine/include/winnt.h"
+            sed -i 's|^#ifdef __x86_64__$|#if defined(__x86_64__) \&\& !defined(__arm64ec__)|g' "$WORK/wine/include/winnt.h"
+            _n=$(grep -c "defined(__x86_64__) && !defined(__arm64ec__)" "$WORK/wine/include/winnt.h" || true)
+            if [ "${_n:-0}" -gt 0 ]; then
+              echo "winnt.h arm64ec fix: shielded $_n __x86_64__ block(s)"
+              grep -n "defined(__x86_64__) && !defined(__arm64ec__)" "$WORK/wine/include/winnt.h" | head -20
             else
               echo "WARN: winnt.h arm64ec fix NOT applied"
             fi
