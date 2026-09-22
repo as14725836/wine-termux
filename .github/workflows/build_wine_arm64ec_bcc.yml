@@ -209,6 +209,16 @@ jobs:
           rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
           cd "$BUILD_DIR" || exit 1
+            echo "--- cross toolchain sanity check ---"
+            printf "int main(void){return 0;}\n" > /tmp/xt.c
+            if aarch64-linux-gnu-gcc /tmp/xt.c -o /tmp/xt 2>/tmp/xt.err; then
+              echo "cross gcc link OK"
+            else
+              echo "cross gcc link FAILED:"; cat /tmp/xt.err | head -20
+            fi
+            ls -la /usr/lib/aarch64-linux-gnu/libc.so /usr/lib/aarch64-linux-gnu/crt1.o 2>&1 | head -4
+            dpkg -l 2>/dev/null | grep -E 'libc6(-dev)?:arm64|libc6-dev-arm64-cross|gcc-aarch64|binutils-aarch64' | head -8
+            apt-get install -y -qq libc6-dev:arm64 2>&1 | tail -3 || true
           CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ "$WORK/wine/configure" \
             --host=aarch64-linux-gnu \
             --enable-archs="$ARCHS" \
@@ -238,7 +248,11 @@ jobs:
             grep -nE '^(CC|CXX|CROSSCC|HOST_ARCH) *=' Makefile | head -6
             which aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ 2>&1 | head -4
           tail -50 /tmp/configure.log
-          if [ $rc -ne 0 ]; then exit 1; fi
+            if [ $rc -ne 0 ]; then
+              echo "--- config.log tail ---"
+              tail -80 config.log 2>/dev/null
+              exit 1
+            fi
             if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
               _wv=$(sed -n 's/^PACKAGE_VERSION = //p' Makefile 2>/dev/null | head -1)
               [ -n "$_wv" ] || _wv=11.18
