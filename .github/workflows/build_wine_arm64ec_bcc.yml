@@ -209,7 +209,7 @@ jobs:
           rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
           cd "$BUILD_DIR" || exit 1
-          "$WORK/wine/configure" \
+          CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ "$WORK/wine/configure" \
             --host=aarch64-linux-gnu \
             --enable-archs="$ARCHS" \
             --with-mingw=llvm-mingw \
@@ -234,6 +234,9 @@ jobs:
             > /tmp/configure.log 2>&1
           rc=$?
           echo "configure rc=$rc"
+            echo "--- cross compiler in use ---"
+            grep -nE '^(CC|CXX|CROSSCC|HOST_ARCH) *=' Makefile | head -6
+            which aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ 2>&1 | head -4
           tail -50 /tmp/configure.log
           if [ $rc -ne 0 ]; then exit 1; fi
             if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
