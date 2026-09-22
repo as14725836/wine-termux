@@ -242,28 +242,25 @@ jobs:
               sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
               echo "patched PACKAGE_VERSION=$_wv into cross config.h"
             fi
-            # --- winnt.h: arm64ec compatibility ---
-            # llvm-mingw arm64ec clang defines __x86_64__ + __arm64ec__ (NOT __aarch64__).
+            # --- winnt.h: arm64ec compatibility (robust normalisation) ---
             # winnt.h picks the CPU CONTEXT via bare "#ifdef __x86_64__" (AMD64 types)
             # and "#ifdef __aarch64__" (ARM64 types).
-            #
-            # arm64ec wants the ARM64 types (see ARM64EC_NT_CONTEXT right above line 2014),
-            # so shield the __x86_64__ blocks and let the ARM64 block also match arm64ec.
-            # 1) undo earlier variants of the __aarch64__ edit
-            sed -i "s|^#if defined(__aarch64__) && !defined(__arm64ec__)$|#ifdef __aarch64__|" "$WORK/wine/include/winnt.h"
-            # 2) ARM64 type block also active for arm64ec
-            sed -i 's#^#ifdef __aarch64__$#if defined(__aarch64__) || defined(__arm64ec__)#' "$WORK/wine/include/winnt.h"
-            # 3) shield bare __x86_64__ blocks under arm64ec
-            sed -i 's|^#ifdef __x86_64__$|#if defined(__x86_64__) \&\& !defined(__arm64ec__)|g' "$WORK/wine/include/winnt.h"
-                _n1=$(grep -c "defined(__x86_64__) && !defined(__arm64ec__)" "$WORK/wine/include/winnt.h" || true)
-                _n2=$(grep -c "defined(__aarch64__) || defined(__arm64ec__)" "$WORK/wine/include/winnt.h" || true)
-                echo "winnt.h arm64ec fix: shielded $_n1 __x86_64__ block(s), ARM64 block matches arm64ec: $_n2"
-                grep -n "defined(__aarch64__) || defined(__arm64ec__)" "$WORK/wine/include/winnt.h" | head -5
-                if [ "${_n1:-0}" -gt 0 ] && [ "${_n2:-0}" -gt 0 ]; then
-                  echo "winnt.h arm64ec fix: OK"
-                else
-                  echo "WARN: winnt.h arm64ec fix incomplete (n1=$_n1 n2=$_n2)"
-                fi
+            # llvm-mingw arm64ec clang defines __x86_64__ + __arm64ec__ (no __aarch64__),
+            # so: make the ARM64 block match arm64ec as well, and shield __x86_64__ blocks.
+            # NOTE: use @ as sed delimiter because the replacement contains "||".
+            _W="$WORK/wine/include/winnt.h"
+            echo "--- winnt.h __aarch64__ conditions BEFORE ---"
+            grep -n "^#if.*__aarch64__" "$_W" | head -12
+            sed -i 's@^#ifdef __aarch64__$@#if defined(__aarch64__) || defined(__arm64ec__)@' "$_W"
+            sed -i 's@^#if defined(__aarch64__) && !defined(__arm64ec__)$@#if defined(__aarch64__) || defined(__arm64ec__)@' "$_W"
+            sed -i 's|^#ifdef __x86_64__$|#if defined(__x86_64__) \&\& !defined(__arm64ec__)|g' "$_W"
+            echo "--- winnt.h __aarch64__ conditions AFTER ---"
+            grep -n "^#if.*__aarch64__" "$_W" | head -12
+            echo "--- winnt.h lines 2012-2038 ---"
+            awk 'NR>=2012 && NR<=2038' "$_W"
+            _n1=$(grep -c "defined(__x86_64__) && !defined(__arm64ec__)" "$_W" || true)
+            _n2=$(grep -c "defined(__aarch64__) || defined(__arm64ec__)" "$_W" || true)
+            echo "winnt.h arm64ec fix: shielded $_n1 x86_64 block(s); arm64ec-aware ARM64 conditions: $_n2"
             # --- winnt.h needs __aarch64__ on the PE side too ---
             # wine configure reports "we need to define __aarch64__: yes" (WINE_CHECK_DEFINE)
             # but that -D only lands in the unix-side CFLAGS; the PE compilers do not get it,
