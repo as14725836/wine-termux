@@ -150,23 +150,43 @@ jobs:
             echo "tools configure rc=$rc"
             tail -25 /tmp/tools-configure.log
             if [ $rc -ne 0 ]; then exit 1; fi
-            make -C tools -j"$(nproc)" > /tmp/tools-make.log 2>&1
+            # autoheader can leave "#undef PACKAGE_VERSION"; winebuild/main.c needs it.
+            if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
+              _wv=$(sed -n 's/^PACKAGE_VERSION = //p' Makefile 2>/dev/null | head -1)
+              [ -n "$_wv" ] || _wv=11.18
+              sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
+              echo "patched PACKAGE_VERSION=$_wv into native tools config.h"
+            fi
+            # NOTE: tools/Makefile is a stub that only knows install/makedep/make_xftmpl,
+            # so "make -C tools" never descends into winebuild/widl/wrc. Use top-level targets.
+            make -j"$(nproc)" \
+              tools/makedep \
+              tools/winebuild/winebuild \
+              tools/widl/widl \
+              tools/wrc/wrc \
+              tools/wmc/wmc \
+              tools/winegcc/winegcc \
+              > /tmp/tools-make.log 2>&1
             rc=$?
             echo "tools make rc=$rc"
             tail -40 /tmp/tools-make.log
             if [ $rc -ne 0 ]; then exit 1; fi
           fi
-          if [ ! -x "$TOOLS_DIR/tools/winebuild/winebuild" ]; then
-            echo "!!! winebuild missing, dumping diagnostics"
+          _missing=""
+          for _t in tools/makedep tools/winebuild/winebuild tools/widl/widl tools/wrc/wrc; do
+            [ -x "$TOOLS_DIR/$_t" ] || _missing="$_missing $_t"
+          done
+          if [ -n "$_missing" ]; then
+            echo "!!! missing wine tools:$_missing"
             echo "--- native configure: mingw / PE arch lines ---"
             grep -iE 'mingw|cross|PE |winebuild' /tmp/tools-configure.log | head -30
             echo "--- tools dir ---"
             ls -la "$TOOLS_DIR/tools" | head -40
-            echo "--- any winebuild binary? ---"
-            find '$TOOLS_DIR/tools' -name 'winebuild*' 2>/dev/null | head -10
+            echo "--- make tail ---"
+            tail -50 /tmp/tools-make.log
             exit 1
           fi
-          ls -la "$TOOLS_DIR/tools/winebuild/winebuild"
+          ls -la "$TOOLS_DIR/tools/winebuild/winebuild" "$TOOLS_DIR/tools/makedep"
 
           echo "===== 3) configure ====="
           BUILD_DIR="$WORK/build-$ARCHS"
@@ -200,6 +220,12 @@ jobs:
           echo "configure rc=$rc"
           tail -50 /tmp/configure.log
           if [ $rc -ne 0 ]; then exit 1; fi
+            if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
+              _wv=$(sed -n 's/^PACKAGE_VERSION = //p' Makefile 2>/dev/null | head -1)
+              [ -n "$_wv" ] || _wv=11.18
+              sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
+              echo "patched PACKAGE_VERSION=$_wv into cross config.h"
+            fi
           echo "--- PE arch detection ---"
           grep -iE 'arm64ec|x86_64-w64|mingw|PE ' /tmp/configure.log | head -25
           echo "--- toolchain summary ---"
