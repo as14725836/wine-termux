@@ -209,6 +209,26 @@ jobs:
           rm -rf "$BUILD_DIR"
           mkdir -p "$BUILD_DIR"
           cd "$BUILD_DIR" || exit 1
+            # --- make sure the cross gcc/g++ entry points really exist ---
+            # multiarch (gcc-aarch64-linux-gnu) and cross (...) toolchains can collide;
+            # apt may leave only versioned binaries such as aarch64-linux-gnu-gcc-13.
+            for _t in gcc g++ cc c++; do
+              _real="/usr/bin/aarch64-linux-gnu-$_t"
+              if [ ! -x "$_real" ]; then
+                _cand=$(ls /usr/bin/aarch64-linux-gnu-$_t-* 2>/dev/null | head -1)
+                if [ -n "$_cand" ]; then
+                  ln -sf "$_cand" "$_real" && echo "linked $_real -> $_cand"
+                else
+                  echo "no aarch64-linux-gnu-$_t found; apt-get install gcc-aarch64-linux-gnu"
+                  apt-get install -y -qq gcc-aarch64-linux-gnu > /tmp/apt-xgcc.log 2>&1 || true
+                  tail -3 /tmp/apt-xgcc.log
+                fi
+              fi
+            done
+            echo "--- /usr/bin/aarch64-linux-gnu-* ---"
+            ls -la /usr/bin/aarch64-linux-gnu-* 2>/dev/null | head -24
+            echo "--- command -v ---"
+            command -v aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ || true
             echo "--- cross toolchain sanity check ---"
             printf "int main(void){return 0;}\n" > /tmp/xt.c
             if aarch64-linux-gnu-gcc /tmp/xt.c -o /tmp/xt 2>/tmp/xt.err; then
