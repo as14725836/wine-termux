@@ -1,4 +1,4 @@
-name: Compile Proton Wine wow64 (auto on Proton release)
+name: proton9.0 Proton Wine wow64 (auto on Proton release)
 
 permissions:
   contents: write
