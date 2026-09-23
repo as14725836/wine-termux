@@ -107,10 +107,11 @@ jobs:
           EOF
 
           # 1) clone Proton wine 源码
-          git clone -b "${{ steps.wine_tag.outputs.wine_tag }}" https://github.com/ValveSoftware/wine.git wine-src
+          git clone -b "${{ steps.wine_tag.outputs.wine_tag }}" https://github.com/Pipetto-crypto/wine.git wine-src
 
           # 2) 修复 termux 路径问题（10.x / 11.x 都应用）
           cd wine-src
+          git clone --branch proton-9.0-arm64ec
           case "${{ steps.wine_tag.outputs.version }}" in
             10.*|11.*)
               echo "修复 Termux 路径问题（version=${{ steps.wine_tag.outputs.version }}）..."
