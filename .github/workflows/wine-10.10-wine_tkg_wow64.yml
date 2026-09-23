@@ -521,9 +521,59 @@ jobs:
             }
           NONUSER_OVERRIDE_EOF
             awk -v ov="$_ov" 'BEGIN{ while ((getline l < ov) > 0) o = o l "\n" } { if (!d && $0 ~ /^[[:space:]]*_script_main[[:space:]]*$/) { printf "%s", o; d=1 } print }' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
-            echo "===== 覆盖检查（nonuser_patcher / user_patcher 应各有 2 次定义，override 在后）====="
-            grep -n '^nonuser_patcher() {' "$NMBS" || echo "⚠️ 未找到 nonuser_patcher 定义"
-            grep -n '^user_patcher() {' "$NMBS" || echo "⚠️ 未找到 user_patcher 定义"
+            echo "===== 覆盖检查（应有 4 个非零结果；override 均带缩进）====="
+            grep -nE '^[[:space:]]*nonuser_patcher\(\)' "$NMBS" || echo "⚠️ 未找到 nonuser_patcher 定义"
+            grep -nE '^[[:space:]]*user_patcher\(\)' "$NMBS" || echo "⚠️ 未找到 user_patcher 定义"
+
+            # ---- hotfixer():它定义在 wine-tkg-patches/hotfixes/hotfixer 里（source 进来的），
+            # 自己直接 patch 且失败即 error+exit1（本次就是它在 autoconf-legacy-fix.mypatch 上退出）。
+            # 同文件内后定义者胜，所以在文件末尾追加容错版即可覆盖。
+            HFIX="$TKG_DIR/wine-tkg-patches/hotfixes/hotfixer"
+            if [ -f "$HFIX" ]; then
+              cat >> "$HFIX" << 'HOTFIXER_OVERRIDE_EOF'
+
+            ########################################################
+            # CI override: hotfixer() (tolerant for custom tree)
+            ########################################################
+            hotfixer() {
+              for _f in "${_hotfixes[@]}"; do
+                if [ -e "${_f}.${_userpatch_ext}revert" ]; then
+                  msg2 "## Applying reverting hotfix for ${_userpatch_target}: ${_f##*/}.${_userpatch_ext}revert"
+                  echo -e "\nApplying reverting hotfix ${_f##*/wine-tkg-git/}.${_userpatch_ext}revert" >> "$_where"/prepare.log
+                  if patch -Np1 -R --dry-run < "${_f}.${_userpatch_ext}revert" >> "$_where"/prepare.log 2>&1; then
+                    if patch -Np1 -R < "${_f}.${_userpatch_ext}revert" >> "$_where"/prepare.log 2>&1; then
+          echo "Applied reverting hotfix ${_f##*/}.${_userpatch_ext}revert" >> "$_where"/last_build_config.log
+                    else
+          warning "SKIP revert hotfix ${_f##*/}.${_userpatch_ext}revert (failed)"
+                    fi
+                  else
+                    echo -e "\n${_f##*/}: REVERT HOTFIX SKIPPED (does not apply)" >> "$_where"/prepare.log
+                    warning "SKIP revert hotfix ${_f##*/}.${_userpatch_ext}revert (does not apply on custom tree)"
+                  fi
+                fi
+              done
+              for _f in "${_hotfixes[@]}"; do
+                if [ -e "${_f}.${_userpatch_ext}patch" ]; then
+                  msg2 "## Applying hotfix for ${_userpatch_target}: ${_f##*/}.${_userpatch_ext}patch"
+                  echo -e "\nApplying hotfix ${_f##*/wine-tkg-git/}.${_userpatch_ext}patch" >> "$_where"/prepare.log
+                  if patch -Np1 --dry-run < "${_f}.${_userpatch_ext}patch" >> "$_where"/prepare.log 2>&1; then
+                    if patch -Np1 < "${_f}.${_userpatch_ext}patch" >> "$_where"/prepare.log 2>&1; then
+          echo "Applied hotfix ${_f##*/}.${_userpatch_ext}patch" >> "$_where"/last_build_config.log
+                    else
+          warning "SKIP hotfix ${_f##*/}.${_userpatch_ext}patch (failed)"
+                    fi
+                  else
+                    echo -e "\n${_f##*/}: HOTFIX SKIPPED (hunks do not apply)" >> "$_where"/prepare.log
+                    warning "SKIP hotfix ${_f##*/}.${_userpatch_ext}patch (hunks do not apply on custom tree)"
+                  fi
+                fi
+              done
+            }
+          HOTFIXER_OVERRIDE_EOF
+              grep -nE '^[[:space:]]*hotfixer\(\)' "$HFIX" || echo "⚠️ hotfixer 覆盖失败"
+            else
+              echo "⚠️ 未找到 $HFIX"
+            fi
           fi
 
           chmod +x ./non-makepkg-build.sh
