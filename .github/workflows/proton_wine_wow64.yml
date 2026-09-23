@@ -74,19 +74,21 @@ jobs:
             fi
           fi
 
-      - name: Convert Proton tag to Wine tag
+      - name: Resolve Wine tag
         id: wine_tag
         if: steps.need_build.outputs.new_release == 'true'
         run: |
           proton_tag="${{ steps.proton.outputs.tag }}"
           proton_rel="${proton_tag#proton-}"
-          version="${proton_rel%-*}"
-          wine_tag="proton-wine-${proton_rel}"
+
+          # ==== 固定使用 proton-9.0-arm64ec 分支 ====
+          wine_tag="proton-9.0-arm64ec"
+          version="9.0"
 
           echo "Proton tag: $proton_tag"
           echo "Proton release: $proton_rel"
-          echo "Wine tag: $wine_tag"
-          echo "Version (major.minor): $version"
+          echo "Wine tag (fixed): $wine_tag"
+          echo "Version (fixed): $version"
 
           echo "proton_tag=$proton_tag"   >> "$GITHUB_OUTPUT"
           echo "proton_rel=$proton_rel"   >> "$GITHUB_OUTPUT"
@@ -106,12 +108,11 @@ jobs:
             fetchJobs = `nproc`
           EOF
 
-          # 1) clone Proton wine 源码
+          # 1) clone Proton wine 源码（固定分支）
           git clone -b "${{ steps.wine_tag.outputs.wine_tag }}" https://github.com/Pipetto-crypto/wine.git wine-src
 
-          # 2) 修复 termux 路径问题（10.x / 11.x 都应用）
+          # 2) 修复 termux 路径问题（仅 10.x / 11.x 应用；9.0 自动跳过）
           cd wine-src
-          git clone --branch proton-9.0-arm64ec
           case "${{ steps.wine_tag.outputs.version }}" in
             10.*|11.*)
               echo "修复 Termux 路径问题（version=${{ steps.wine_tag.outputs.version }}）..."
