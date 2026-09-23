@@ -1,4 +1,4 @@
-name: Compile Wine TkG wow64 (auto)
+name: wine-10.10-wine Wine TkG wow64 (auto)
 
 permissions:
   contents: write
