@@ -1,4 +1,4 @@
-name: Build Wine ARM64EC (BCC Ubuntu 24.04)
+name: winlator Wine TkG wow64 (auto)
 
 permissions:
   contents: write
@@ -7,443 +7,324 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      wine_branch:
-        description: 'Wine branch/tag'
+      tag:
+        description: "Wine release tag（可选，例如：wine-9.22，不填则使用最新tag）"
         required: false
-        default: 'wine-11.18'
         type: string
-      archs:
-        description: 'PE archs for --enable-archs'
+      tkg:
+        description: "Wine TkG仓库分支"
         required: false
-        default: 'arm64ec,aarch64,i386'
         type: string
-      apply_userpatches:
-        description: 'Apply 0060 / 0061 / termux-dns-fix patches from repo root'
+      enable_mf:
+        description: "启用 Proton MF 解码"
         required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+        type: boolean
+        default: false
+      enable_esync:
+        description: "启用 esync（新版 wine 的 esync-unix 补丁可能不兼容，失败时关闭此开关绕过）"
+        required: false
+        type: boolean
+        default: true
   schedule:
-    - cron: '30 18 1 * *'
-
-env:
-  ROOTFS_NAME: ubuntu2404
-  ROOTFS_URL: https://github.com/as14725836/BCC/releases/download/wine-arm64ec-ubuntu2404-bcc-latest/wine-ubuntu2404-bcc-arm64ec.tar.xz
-  LLVM_MINGW_DIR: llvm-mingw-20260908-ucrt-ubuntu-22.04-x86_64
-  LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-ubuntu-22.04-x86_64.tar.xz
-  BCC_MOUNT_URL: https://raw.githubusercontent.com/as14725836/BCC/main/mount.sh
-  OUT_NAME: wine-arm64ec
+    - cron: "0 1 * * *"
 
 jobs:
-  build-arm64ec:
+  BCC:
     runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: Restore last wine release tag from cache
+        id: cache-tag
+        uses: actions/cache@v4
+        with:
+          path: .wine_last_tag
+          key: wine-last-tag
+
+      - name: Get latest wine tag
+        id: wine-mirror
+        env:
+          CUSTOM_TAG: ${{ github.event.inputs.tag }}
+          ENABLE_MF: ${{ github.event.inputs.enable_mf || 'false' }}
         run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet "/usr/local/lib/android" /opt/ghc 2>/dev/null || true
-          df -h /
-
-      - name: Download rootfs and PE toolchain
-        run: |
-          set -x
-          aria2c -s$(nproc) -x$(nproc) -k1M -o rootfs.tar.xz "$ROOTFS_URL"
-          sudo tar -xf rootfs.tar.xz -C /tmp
-          aria2c -s$(nproc) -x$(nproc) -k1M -o llvm-mingw.tar.xz "$LLVM_MINGW_URL"
-          tar -xf llvm-mingw.tar.xz -C /tmp
-          sudo mkdir -p /tmp/${ROOTFS_NAME}/opt
-          sudo mv /tmp/${LLVM_MINGW_DIR} /tmp/${ROOTFS_NAME}/opt/llvm-mingw
-          wget -q -O /tmp/bcc-mount.sh "$BCC_MOUNT_URL"
-          sudo chmod +x /tmp/bcc-mount.sh
-          echo "===== PE toolchain check ====="
-          ls /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin | grep -cE '^arm64ec-w64-mingw32-'
-          ls /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin | grep -E '^arm64ec-w64-mingw32-(clang|gcc)$'
-          ls /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin | grep -E '^x86_64-w64-mingw32-(clang|gcc)$'
-          /tmp/${ROOTFS_NAME}/opt/llvm-mingw/bin/arm64ec-w64-mingw32-clang --version | head -2 || true
-          echo "--- arm64ec predefined macros (aarch64/x86_64/arm64ec) ---"
-          arm64ec-w64-mingw32-clang -dM -E -x c /dev/null 2>/dev/null | grep -E '__aarch64__|__x86_64__|__arm64ec__|_M_ARM64EC|_M_AMD64|_M_ARM64' | sort
-          echo "--- end macros ---"
-          echo "--- aarch64 PE predefined macros ---"
-          aarch64-w64-mingw32-clang -dM -E -x c /dev/null 2>/dev/null | grep -E '__aarch64__|__x86_64__|__arm64ec__|_M_ARM64' | sort || true
-          echo "--- end aarch64 macros ---"
-
-      - name: Stage user patches
-        run: |
-          mkdir -p /tmp/stage-patches
-          for f in 0060-quartz-implement-colour-filter.patch \
-                   0061-qasf-deliver-compressed-asf-streams.patch \
-                   termux-dns-fix.patch; do
-            if [ -f "$f" ]; then cp "$f" /tmp/stage-patches/; echo "staged: $f"; else echo "not found (skipped): $f"; fi
-          done
-          sudo rm -rf /tmp/${ROOTFS_NAME}/tmp/patches
-          sudo cp -r /tmp/stage-patches /tmp/${ROOTFS_NAME}/tmp/patches
-          ls -la /tmp/${ROOTFS_NAME}/tmp/patches
-
-      - name: Write build script
-        run: |
-          cat > /tmp/build-arm64ec.sh << 'BUILDEOF'
-          #!/bin/bash
-          set -x
-          export DEBIAN_FRONTEND=noninteractive
-          export PATH=/opt/llvm-mingw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-          export LANG=C.UTF-8
-          export LC_ALL=C.UTF-8
-
-          # arm64 multiarch 的 pkg-config（交叉编译关键）
-          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-
-          WINE_BRANCH="${WINE_BRANCH:-wine-11.18}"
-          ARCHS="${ARCHS:-arm64ec}"
-          APPLY_USERPATCHES="${APPLY_USERPATCHES:-true}"
-          WORK=/tmp/build
-          mkdir -p "$WORK"
-          cd "$WORK" || exit 1
-
-          echo "===== 0) toolchain ====="
-          arm64ec-w64-mingw32-clang --version | head -2 || { echo "FATAL: arm64ec clang missing"; exit 1; }
-          aarch64-linux-gnu-gcc --version | head -1
-          # ensure host-prefixed cross g++ (wine configure needs it)
-          if ! command -v aarch64-linux-gnu-g++ >/dev/null 2>&1; then
-            echo "installing g++-aarch64-linux-gnu ..."
-            apt-get update -qq > /tmp/apt-cross.log 2>&1
-            apt-get install -y -qq g++-aarch64-linux-gnu >> /tmp/apt-cross.log 2>&1
-            tail -5 /tmp/apt-cross.log
+          if [ -n "$CUSTOM_TAG" ]; then
+            echo "Use custom tag from manual dispatch: $CUSTOM_TAG"
+            latest_tag="$CUSTOM_TAG"
+          else
+            latest_tag=$(git ls-remote --tags https://github.com/wine-mirror/wine.git | \
+              grep -Ev '\^\{\}$' | sed 's/.*\///' | grep -E '^wine-[0-9]+\.[0-9]+.*$' | sort -V | tail -n 1)
           fi
-          aarch64-linux-gnu-g++ --version | head -1 || echo "WARN: cross g++ missing"
-          # native wine build 需要 32 位开发库（wine configure 会检测 gcc -m32）
-          apt-get update -qq > /tmp/apt-m32.log 2>&1
-          apt-get install -y -qq gcc-multilib g++-multilib libc6-dev-i386 >> /tmp/apt-m32.log 2>&1 || echo "WARN: multilib install failed"
-          tail -5 /tmp/apt-m32.log
-          echo "int main(void){return 0;}" > /tmp/m32test.c
-          gcc -m32 /tmp/m32test.c -o /tmp/m32test && echo "m32 OK" || echo "WARN: m32 still broken"
-          rm -f /tmp/m32test /tmp/m32test.c
-
-          echo "===== 1) wine source: $WINE_BRANCH ====="
-          if [ ! -d wine/.git ]; then
-            git clone --depth 1 -b "$WINE_BRANCH" https://github.com/wine-mirror/wine.git wine || exit 1
-          fi
-          cd wine || exit 1
-          git log --oneline -1
-
-          if [ "$APPLY_USERPATCHES" = "true" ] && [ -d /tmp/patches ]; then
-            echo "===== 2) user patches ====="
-            for p in /tmp/patches/*.patch; do
-              [ -f "$p" ] || continue
-              echo "--- applying $(basename "$p")"
-              if patch -p1 --forward --no-backup-if-mismatch < "$p"; then
-                echo "    OK"
-              else
-                echo "    FAILED or already applied"
-              fi
-            done
-            echo "--- .rej files:"
-            find . -name '*.rej'
-          fi
-
-          echo "===== 2.5) native wine-tools (for x86_64 build host) ====="
-          TOOLS_DIR="$WORK/wine-tools"
-          if [ ! -x "$TOOLS_DIR/tools/winebuild/winebuild" ]; then
-            rm -rf "$TOOLS_DIR"
-            mkdir -p "$TOOLS_DIR"
-            cd "$TOOLS_DIR" || exit 1
-            "$WORK/wine/configure" --enable-win64 --disable-tests --with-mingw=llvm-mingw > /tmp/tools-configure.log 2>&1
-            rc=$?
-            echo "tools configure rc=$rc"
-            tail -25 /tmp/tools-configure.log
-            if [ $rc -ne 0 ]; then exit 1; fi
-            # autoheader can leave "#undef PACKAGE_VERSION"; winebuild/main.c needs it.
-            if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
-              _wv=$(sed -n 's/^PACKAGE_VERSION = //p' Makefile 2>/dev/null | head -1)
-              [ -n "$_wv" ] || _wv=11.18
-              sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
-              echo "patched PACKAGE_VERSION=$_wv into native tools config.h"
-            fi
-            # NOTE: tools/Makefile is a stub that only knows install/makedep/make_xftmpl,
-            # so "make -C tools" never descends into winebuild/widl/wrc. Use top-level targets.
-            make -j"$(nproc)" \
-              tools/makedep \
-              tools/winebuild/winebuild \
-              tools/widl/widl \
-              tools/wrc/wrc \
-              tools/wmc/wmc \
-              tools/winegcc/winegcc \
-              > /tmp/tools-make.log 2>&1
-            rc=$?
-            echo "tools make rc=$rc"
-            tail -40 /tmp/tools-make.log
-            if [ $rc -ne 0 ]; then exit 1; fi
-            # wrc is a build-host tool and locates nls relative to its own path:
-            #   $TOOLS_DIR/tools/wrc/wrc  ->  $TOOLS_DIR/nls
-            # The wine-tools tree has no nls/, so wrc fails with "unable to load locale.nls".
-            make -j"$(nproc)" nls/ > /tmp/tools-nls.log 2>&1 || true
-            if [ ! -f nls/locale.nls ]; then
-              echo "make nls/ did not produce locale.nls; copying from source tree"
-              mkdir -p nls
-              cp -a "$WORK/wine/nls/." nls/
-            fi
-            ls -la nls/locale.nls
-          fi
-          _missing=""
-          for _t in tools/makedep tools/winebuild/winebuild tools/widl/widl tools/wrc/wrc nls/locale.nls; do
-            if [ -f "$TOOLS_DIR/$_t" ]; then :; elif [ -x "$TOOLS_DIR/$_t" ]; then :; else _missing="$_missing $_t"; fi
-          done
-          if [ -n "$_missing" ]; then
-            echo "!!! missing wine tools:$_missing"
-            echo "--- native configure: mingw / PE arch lines ---"
-            grep -iE 'mingw|cross|PE |winebuild' /tmp/tools-configure.log | head -30
-            echo "--- tools dir ---"
-            ls -la "$TOOLS_DIR/tools" | head -40
-            echo "--- make tail ---"
-            tail -50 /tmp/tools-make.log
+          if [ -z "$latest_tag" ]; then
+            echo "❌ Failed to get latest Wine tag!"
             exit 1
           fi
-          ls -la "$TOOLS_DIR/tools/winebuild/winebuild" "$TOOLS_DIR/tools/makedep"
-
-          echo "===== 3) configure ====="
-          BUILD_DIR="$WORK/build-$ARCHS"
-          rm -rf "$BUILD_DIR"
-          mkdir -p "$BUILD_DIR"
-          cd "$BUILD_DIR" || exit 1
-            # --- make sure the cross gcc/g++ entry points really exist ---
-            # multiarch (gcc-aarch64-linux-gnu) and cross (...) toolchains can collide;
-            # apt may leave only versioned binaries such as aarch64-linux-gnu-gcc-13.
-            for _t in gcc g++ cc c++; do
-              _real="/usr/bin/aarch64-linux-gnu-$_t"
-              if [ ! -x "$_real" ]; then
-                _cand=$(ls /usr/bin/aarch64-linux-gnu-$_t-* 2>/dev/null | head -1)
-                if [ -n "$_cand" ]; then
-                  ln -sf "$_cand" "$_real" && echo "linked $_real -> $_cand"
-                else
-                  echo "no aarch64-linux-gnu-$_t found; apt-get install gcc-aarch64-linux-gnu"
-                  apt-get install -y -qq gcc-aarch64-linux-gnu > /tmp/apt-xgcc.log 2>&1 || true
-                  tail -3 /tmp/apt-xgcc.log
-                fi
-              fi
-            done
-            echo "--- /usr/bin/aarch64-linux-gnu-* ---"
-            ls -la /usr/bin/aarch64-linux-gnu-* 2>/dev/null | head -24
-            echo "--- command -v ---"
-            command -v aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ || true
-            echo "--- cross toolchain sanity check ---"
-            printf "int main(void){return 0;}\n" > /tmp/xt.c
-            if aarch64-linux-gnu-gcc /tmp/xt.c -o /tmp/xt 2>/tmp/xt.err; then
-              echo "cross gcc link OK"
+          echo "Latest Wine tag: $latest_tag"
+          echo "$latest_tag" > .wine_current_tag
+          echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "enable_mf=$ENABLE_MF" >> "$GITHUB_OUTPUT"
+      - name: Read last saved tag (if any)
+        id: last
+        run: |
+          if [ -f .wine_last_tag ]; then
+            last_tag=$(cat .wine_last_tag)
+          else
+            last_tag=""
+          fi
+          echo "Last Wine tag: $last_tag"
+          echo "tag=$last_tag" >> "$GITHUB_OUTPUT"
+      - name: Compare tags and decide whether to run build
+        id: need_build
+        run: |
+          event_name="${{ github.event_name }}"
+          if [ "$event_name" = "workflow_dispatch" ]; then
+            echo "Manual dispatch, force build."
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
+          else
+            current_tag="${{ steps.wine-mirror.outputs.tag }}"
+            last_tag="${{ steps.last.outputs.tag }}"
+            if [ "$current_tag" != "$last_tag" ]; then
+              echo "New release detected: $current_tag (was $last_tag)"
+              echo "new_release=true" >> "$GITHUB_OUTPUT"
             else
-              echo "cross gcc link FAILED:"; cat /tmp/xt.err | head -20
+              echo "No change in Wine tag, skip build."
+              echo "new_release=false" >> "$GITHUB_OUTPUT"
             fi
-            ls -la /usr/lib/aarch64-linux-gnu/libc.so /usr/lib/aarch64-linux-gnu/crt1.o 2>&1 | head -4
-            dpkg -l 2>/dev/null | grep -E 'libc6(-dev)?:arm64|libc6-dev-arm64-cross|gcc-aarch64|binutils-aarch64' | head -8
-            apt-get install -y -qq libc6-dev:arm64 2>&1 | tail -3 || true
-          CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ "$WORK/wine/configure" \
-            --host=aarch64-linux-gnu \
-            --enable-archs="$ARCHS" \
-            --with-mingw=llvm-mingw \
-            --with-wine-tools="$TOOLS_DIR" \
-            --prefix=/opt/wine-arm64ec \
-            --disable-win16 \
-            --disable-tests \
-            --without-capi \
-            --without-coreaudio \
-            --without-cups \
-            --without-gphoto \
-            --without-opencl \
-            --without-oss \
-            --without-pcap \
-            --without-pcsclite \
-            --without-sane \
-            --without-udev \
-            --without-usb \
-            --without-v4l2 \
-            --without-wayland \
-            --without-xinerama \
-            > /tmp/configure.log 2>&1
-          rc=$?
-          echo "configure rc=$rc"
-            echo "--- cross compiler in use ---"
-            grep -nE '^(CC|CXX|CROSSCC|HOST_ARCH) *=' Makefile | head -6
-            which aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ 2>&1 | head -4
-          tail -50 /tmp/configure.log
-            if [ $rc -ne 0 ]; then
-              echo "--- config.log tail ---"
-              tail -80 config.log 2>/dev/null
-              exit 1
+          fi
+      - name: Set build variables
+        if: steps.need_build.outputs.new_release == 'true'
+        id: wine_tag
+        run: |
+          wine_tag="${{ steps.wine-mirror.outputs.tag }}"
+          wine_ver="${wine_tag#wine-}"
+          pkg_name="dxgi"
+          if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
+            pkg_name="mf"
+          fi
+          echo "wine_tag=$wine_tag" >> "$GITHUB_OUTPUT"
+          echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
+          echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
+          echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
+      - name: Clone project & setup rootfs
+        if: steps.need_build.outputs.new_release == 'true'
+        run: |
+          echo "Using Wine tag: ${{ steps.wine_tag.outputs.wine_tag }}"
+          cat > ~/.gitconfig << EOF
+          [fetch]
+            parallel = $(nproc)
+          [submodule]
+            fetchJobs = $(nproc)
+          EOF
+          tkg_branch="${{ github.event.inputs.tkg }}"
+          if [ -z "$tkg_branch" ]; then
+            git clone https://github.com/Frogging-Family/wine-tkg-git.git
+          else
+            git clone -b "$tkg_branch" https://github.com/Frogging-Family/wine-tkg-git.git
+          fi
+          cd /tmp
+          aria2c -s$(nproc) -x$(nproc) https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+          sudo tar xf wine-bcc.tar.xz || { echo "❌ Extract failed"; exit 1; }
+          if [ ! -d "archlinux" ]; then
+            echo "❌ Expected 'archlinux' directory not found after extract!"
+            exit 1
+          fi
+          sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
+          sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
+          echo "Creating /tmp/wine-termux directory with required scripts..."
+          sudo mkdir -p /tmp/archlinux/tmp/wine-termux
+
+          if [ -f "$GITHUB_WORKSPACE/patch.sh" ]; then
+            sudo cp "$GITHUB_WORKSPACE/patch.sh" /tmp/archlinux/tmp/wine-termux/
+            echo "✅ Copied patch.sh"
+          else
+            echo "❌ patch.sh not found in repository root!"
+            exit 1
+          fi
+
+          if [ -f "$GITHUB_WORKSPACE/set-tkg-cfg.sh" ]; then
+            sudo cp "$GITHUB_WORKSPACE/set-tkg-cfg.sh" /tmp/archlinux/tmp/wine-termux/
+            echo "✅ Copied set-tkg-cfg.sh"
+          else
+            echo "❌ set-tkg-cfg.sh not found in repository root!"
+            exit 1
+          fi
+
+          sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
+
+          echo "Contents of /tmp/wine-termux:"
+          sudo ls -la /tmp/archlinux/tmp/wine-termux/
+          cat > build-wine.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          mkdir -p ~/.cache
+          if [ ! -f /tmp/wine-termux/patch.sh ]; then
+            echo "❌ /tmp/wine-termux/patch.sh not found!"
+            exit 1
+          fi
+          if [ ! -f /tmp/wine-termux/set-tkg-cfg.sh ]; then
+            echo "❌ /tmp/wine-termux/set-tkg-cfg.sh not found!"
+            exit 1
+          fi
+          if [ -f /tmp/ccache.tar.xz ]; then
+            echo "✅ Using cached ccache..."
+            mkdir -p ~/.cache/ccache
+            tar xvf /tmp/ccache.tar.xz -C ~/.cache/
+          fi
+          export USE_CACHE=1
+          export ENABLE_PROTON_MF=${{ steps.wine-mirror.outputs.enable_mf }}
+          export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
+          cd /tmp/wine-tkg-git/wine-tkg-git/
+          bash -x /tmp/wine-termux/patch.sh wine-tkg-auto "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
+          bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
+          if [ "$ENABLE_ESYNC" = "false" ]; then
+            echo "⚠️ esync 已手动禁用，将关闭 _use_esync"
+            sed -i 's/^_use_esync=.*/_use_esync="false"/' customization.cfg
+            grep -q '^_use_esync=' customization.cfg || echo '_use_esync="false"' >> customization.cfg
+          fi
+          echo '_ci_build="true"' >> customization.cfg
+
+          # ===================== Custom wine source + no-patch hook =====================
+          TKG_DIR="/tmp/wine-tkg-git/wine-tkg-git"
+          PREPARE_SH="${TKG_DIR}/wine-tkg-scripts/prepare.sh"
+          NMBS="${TKG_DIR}/non-makepkg-build.sh"
+
+          if [ ! -f "$PREPARE_SH" ]; then
+            echo "❌ prepare.sh not found: $PREPARE_SH"
+            exit 1
+          fi
+          if [ ! -f "$NMBS" ]; then
+            echo "❌ non-makepkg-build.sh not found: $NMBS"
+            exit 1
+          fi
+
+          # 1) 把 _custom_wine_source 函数追加到 prepare.sh 末尾
+          cat >> "$PREPARE_SH" << 'HOOKEOF'
+
+          ########################################################################
+          # Custom wine source (brunodev85/wine-10.10-custom) — injected by CI
+          ########################################################################
+          _custom_wine_source() {
+            local _src="${srcdir}/${_winesrcdir}"
+            CUSTOM_WINE_URL="https://github.com/brunodev85/wine-10.10-custom.git"
+            CUSTOM_WINE_REF="main"
+
+            msg2 "Replacing wine source with custom: $CUSTOM_WINE_URL ($CUSTOM_WINE_REF)"
+            rm -rf "$_src"
+            git clone --depth 1 -b "$CUSTOM_WINE_REF" "$CUSTOM_WINE_URL" "$_src" \
+              || { warning "custom wine clone failed"; return 1; }
+
+            if [ ! -d "$_src" ]; then
+              warning "custom wine source dir missing: $_src"
+              return 1
             fi
-            if ! grep -q "^#define PACKAGE_VERSION" include/config.h 2>/dev/null; then
-              _wv=$(sed -n 's/^PACKAGE_VERSION = //p' Makefile 2>/dev/null | head -1)
-              [ -n "$_wv" ] || _wv=11.18
-              sed -i "s|^\(/\* \)\?#undef PACKAGE_VERSION\( \*/\)\?$|#define PACKAGE_VERSION \"$_wv\"|" include/config.h
-              echo "patched PACKAGE_VERSION=$_wv into cross config.h"
-            fi
-            # --- winnt.h: arm64ec / aarch64 compatibility ---
-            # winnt.h picks the CPU CONTEXT via "#ifdef __x86_64__" (AMD64 types) /
-            # "#ifdef __aarch64__" (ARM64 types). Reality per translation unit:
-            #   x86_64 PE : __x86_64__                            -> AMD64 types
-            #   arm64ec PE: __x86_64__ + __arm64ec__ (no __aarch64__) -> ARM64 types
-            #   aarch64 PE: __aarch64__                           -> ARM64 types
-            #   unix side : __aarch64__ (gcc)                     -> ARM64 types
-            # So the AMD64 block must require that NEITHER arm macro is present.
-            _W="$WORK/wine/include/winnt.h"
-            echo "--- winnt.h conditions BEFORE ---"
-            grep -nE "^(#if|#elif).*(__aarch64__|__x86_64__)" "$_W" | head -16
-            # 1) ARM64 type block: also active for arm64ec
-            sed -i 's@^#ifdef __aarch64__$@#if defined(__aarch64__) || defined(__arm64ec__)@' "$_W"
-            sed -i 's@^#if defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__aarch64__) || defined(__arm64ec__)@' "$_W"
-            # 2) AMD64 type block: only for a genuine x86_64 PE target
-            sed -i 's@^#ifdef __x86_64__$@#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)@g' "$_W"
-            sed -i 's@^#if defined(__x86_64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)@g' "$_W"
-            sed -i 's@^#if defined(__x86_64__) \&\& !defined(__aarch64__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)@g' "$_W"
-            echo "--- winnt.h conditions AFTER ---"
-            grep -nE "^(#if|#elif).*(__aarch64__|__x86_64__)" "$_W" | head -16
-            echo "--- winnt.h lines 2014 + 8076 ---"
-            echo "--- winnt.h per-block __x86_64__ conditions BEFORE ---"
-            # FINAL: restore wine native semantics.
-            #  arm64ec must NOT take the ARM64 definitions (wine uses AMD64 CONTEXT there
-            #  and defines DISPATCHER_CONTEXT / DISPATCHER_CONTEXT_ARM64EC separately).
-            #  So: 2014 back to "#ifdef __aarch64__"; 1420 becomes x86_64-and-not-aarch64.
-            sed -i 's@^#if defined(__aarch64__) || defined(__arm64ec__)$@#ifdef __aarch64__@' "$_W"
-            sed -i '1420s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
-            echo "--- winnt.h FINAL conditions ---"
-            echo "2014:"; awk 'NR==2014' "$_W"
-            echo "1420 / 2104 / 2534 / 8076:"; awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
-            echo "2030:"; awk 'NR==2030' "$_W"
-            awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
-            # 2104 (DISPATCHER_CONTEXT) and 2534 (RtlIsEcCode) MUST stay active on arm64ec;
-            # only 1420 (CONTEXT aliases) and 8076 (x86 asm) are arm64ec-excluded.
-            sed -i '2104s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
-            sed -i '2534s@^#if defined(__x86_64__) \&\& !defined(__aarch64__) \&\& !defined(__arm64ec__)$@#if defined(__x86_64__) \&\& !defined(__aarch64__)@' "$_W"
-            echo "--- winnt.h per-block __x86_64__ conditions AFTER ---"
-            awk 'NR==1420 || NR==2104 || NR==2534 || NR==8076' "$_W"
-            echo "--- lines 2104-2107 / 2534-2536 ---"
-            awk 'NR>=2104 && NR<=2107 || NR>=2534 && NR<=2536' "$_W"
-            awk 'NR==2014 || NR==8076' "$_W"
-            _s="#if defined(__x86_64__) && !defined(__aarch64__) && !defined(__arm64ec__)"
-            _n1=$(grep -cF "$_s" "$_W" || true)
-            _n2=$(grep -c "defined(__aarch64__) || defined(__arm64ec__)" "$_W" || true)
-            echo "winnt.h fix: shielded $_n1 x86_64 block(s); ARM64 conditions: $_n2"
-            # --- PE-side arch macros ---
-            # llvm-mingw does not predefine __aarch64__ / __arm64ec__ for its PE targets,
-            # and ${arch}_EXTRACFLAGS is not consumed by the PE compile rules; the flags
-            # that really reach the compiler are ${arch}_CFLAGS (see the -g -O2 in the log).
-            # Each arch needs a different macro:
-            #   aarch64 PE -> -D__aarch64__
-            #   arm64ec PE -> -D__arm64ec__   (NOT __aarch64__, that would skip the AMD64
-            #                                  CONTEXT block wine expects for arm64ec)
-            for _pair in "aarch64:__aarch64__" "arm64ec:__arm64ec__"; do
-              _a="${_pair%%:*}"; _m="${_pair##*:}"
-              sed -i "s@^${_a}_EXTRACFLAGS = -D__aarch64__ @${_a}_EXTRACFLAGS = @" Makefile
-              sed -i "s@^${_a}_EXTRACFLAGS = -D__arm64ec__ @${_a}_EXTRACFLAGS = @" Makefile
-              if sed -n "s@^${_a}_CFLAGS = @@p" Makefile | grep -q -- "-D${_m}"; then :; else
-                sed -i "s@^${_a}_CFLAGS = @${_a}_CFLAGS = -D${_m} @" Makefile
-              fi
-            done
-            echo "--- arch CFLAGS/EXTRACFLAGS now ---"
-            grep -E "^(aarch64|arm64ec|i386|x86_64)_(CFLAGS|EXTRACFLAGS) *=" Makefile | head -8
-            echo "--- probe: does arm64ec clang define __arm64ec__ ? ---"
-            printf '#ifdef __arm64ec__\nint ok;\n#else\n#error __arm64ec__ NOT defined\n#endif\n' > /tmp/m64ec.c
-            if arm64ec-w64-mingw32-clang -c /tmp/m64ec.c -o /tmp/m64ec.o 2>/tmp/m64ec.err; then
-              echo "__arm64ec__ IS defined by clang"
-            else
-              echo "__arm64ec__ NOT defined by clang:"; head -3 /tmp/m64ec.err
-            fi
-          echo "--- PE arch detection ---"
-          grep -iE 'arm64ec|x86_64-w64|mingw|PE ' /tmp/configure.log | head -25
-          echo "--- toolchain summary ---"
-          grep -E '^ (CC|CROSSCC|HOST_ARCH)|archs *:' /tmp/configure.log | head -20
+            msg2 "Custom wine source ready at $_src"
+            return 0
+          }
+          ########################################################################
+          HOOKEOF
 
-          echo "===== 4) make ====="
-          make -j"$(nproc)" > /tmp/make.log 2>&1
-          rc=$?
-          echo "make rc=$rc"
-            echo "--- context around first error (includes compile command) ---"
-            grep -n -B12 'error:' /tmp/make.log 2>/dev/null | head -70 || true
-            echo "--- all error lines ---"
-            grep -n 'error:' /tmp/make.log 2>/dev/null | head -25 || true
-            echo "--- tail of make.log ---"
-            tail -60 /tmp/make.log
-          if [ $rc -ne 0 ]; then exit 1; fi
+          # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_custom_wine_source`
+          awk '
+            /^[[:space:]]*_prepare[[:space:]]*$/ && !done {
+              print
+              print "        _custom_wine_source"
+              done=1
+              next
+            }
+            { print }
+          ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
 
-          echo "===== 5) install ====="
-          rm -rf /tmp/wine-out
-          make install DESTDIR=/tmp/wine-out > /tmp/install.log 2>&1
-          rc=$?
-          echo "install rc=$rc"
-          if [ $rc -ne 0 ]; then tail -40 /tmp/install.log; exit 1; fi
+          echo "===== Hook check ====="
+          grep -n "_custom_wine_source" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
+          grep -n "_custom_wine_source" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
+          # ===================== Custom wine source hook end =====================
 
-          echo "===== 6) result ====="
-          ls -la /tmp/wine-out/opt/wine-arm64ec/bin | head -20
-          echo "--- PE dll dirs ---"
-          ls -d /tmp/wine-out/opt/wine-arm64ec/lib/wine/*-windows 2>/dev/null
-          echo "BUILD DONE"
-          BUILDEOF
-          sudo cp /tmp/build-arm64ec.sh /tmp/${ROOTFS_NAME}/bin/build-arm64ec.sh
-          sudo chmod +x /tmp/${ROOTFS_NAME}/bin/build-arm64ec.sh
-          bash -n /tmp/build-arm64ec.sh && echo "build script syntax OK"
-
-      - name: Chroot build
+          chmod +x ./non-makepkg-build.sh
+          yes | ./non-makepkg-build.sh || exit 1
+          cd /tmp/output/
+          tar -I 'xz -T$(nproc) -9' -cvf "/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.wcp" */
+          cd ~/.cache/
+          rm -rf /tmp/ccache.tar.xz
+          tar -I 'xz -T$(nproc)' -cvf /tmp/ccache.tar.xz ccache
+          echo "✅ Build completed and ccache archived."
+          EOF
+          sudo chmod +x build-wine.sh
+          sudo mv build-wine.sh archlinux/bin/build-wine.sh
+      - name: Restore ccache
+        if: steps.need_build.outputs.new_release == 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: wine-tkg-ccache-Linux-x86_64
+          restore-keys: |
+            wine-tkg-ccache-Linux-x86_64
+      - name: Compile Using BCC Chroot
+        if: steps.need_build.outputs.new_release == 'true'
         run: |
           cd /tmp
-          sudo bash bcc-mount.sh mount ${ROOTFS_NAME}
-          set +e
-          sudo chroot ${ROOTFS_NAME} /usr/bin/env \
-            WINE_BRANCH="${{ inputs.wine_branch || 'wine-11.18' }}" \
-            ARCHS="${{ inputs.archs || 'arm64ec' }}" \
-            APPLY_USERPATCHES="${{ inputs.apply_userpatches || 'true' }}" \
-            /bin/bash /bin/build-arm64ec.sh 2>&1 | tee /tmp/build.log
-          rc=${PIPESTATUS[0]}
-          sudo bash bcc-mount.sh unmount ${ROOTFS_NAME}
-          echo "=================================="
-          echo "BUILD EXIT CODE: $rc"
-          echo "=================================="
-          exit $rc
-
-      - name: Show logs on failure
-        if: failure()
-        run: |
-          for f in /tmp/configure.log /tmp/make.log /tmp/build.log; do
-            if [ -f "/tmp/${ROOTFS_NAME}$f" ]; then
-              echo "########## $f ##########"
-              tail -100 "/tmp/${ROOTFS_NAME}$f"
-            fi
-          done
-          echo "########## fallback: build.log ##########"
-          tail -150 /tmp/build.log || true
-
-      - name: Package
-        run: |
-          set -x
-          sudo rm -rf /tmp/out-stage
-          mkdir -p /tmp/out-stage
-          sudo mv /tmp/${ROOTFS_NAME}/tmp/wine-out /tmp/out-stage/wine-arm64ec
-          sudo chown -R $(id -u):$(id -g) /tmp/out-stage
-          du -sh /tmp/out-stage/wine-arm64ec
-          tar -I 'xz -T$(nproc) -9' -cvf /tmp/${OUT_NAME}.tar.xz -C /tmp/out-stage wine-arm64ec
-          ls -la /tmp/${OUT_NAME}.tar.xz
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          sudo chroot archlinux /bin/build-wine.sh
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+          if [ ! -f "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.wcp" ]; then
+            echo "❌ Build output not found!"
+            exit 1
+          fi
+          sudo chmod 644 "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.wcp"
+          sudo chmod 644 /tmp/archlinux/tmp/ccache.tar.xz
+      - name: Save ccache
+        if: steps.need_build.outputs.new_release == 'true' && github.run_attempt == 1
+        uses: actions/cache/save@v5
         with:
-          name: wine-arm64ec
-          path: /tmp/wine-arm64ec.tar.xz
-          retention-days: 14
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: wine-tkg-ccache-Linux-x86_64
 
-      - name: Release
-        if: github.event_name == 'workflow_dispatch' && inputs.wine_branch != '' || github.event_name == 'schedule'
+      - name: Upload Source to wine-termux
+        if: steps.need_build.outputs.new_release == 'true'
+        run: |
+          src_dir="/tmp/archlinux/tmp/wine-tkg/src/wine-git"
+          if [ ! -d "$src_dir" ]; then
+            echo "❌ Source directory not found: $src_dir"
+            exit 1
+          fi
+          sudo chown -R $USER:$USER /tmp/archlinux/tmp/wine-tkg/src/wine-git
+          cd /tmp/archlinux/tmp/wine-tkg/src/wine-git/
+          sudo cp -r -p /tmp/archlinux/tmp/output/*/share/wine/wine-tkg-config.txt .
+          sudo chmod 644 wine-tkg-config.txt
+          sudo rm -rf .git
+          cd "$src_dir"
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch_name="${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}"
+          git checkout -b "$branch_name"
+          git add .
+          git commit -m "Auto-commit source for ${{ steps.wine_tag.outputs.wine_tag }} (PKG: ${{ steps.wine_tag.outputs.PKG_NAME }})"
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/as14725836/wine-termux.git
+          git push -f --set-upstream origin "$branch_name"
+      - name: Create GitHub Release
+        if: steps.need_build.outputs.new_release == 'true'
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: wine-arm64ec-${{ inputs.wine_branch || 'wine-11.18' }}-${{ github.run_number }}
-          name: Wine ARM64EC ${{ inputs.wine_branch || 'wine-11.18' }} (Ubuntu 24.04 BCC)
+          target_commitish: ${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}
+          tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}
+          name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME == 'mf' && 'mf' || 'dxgi' }}) TkG Staging GE
           body: |
-            Wine ARM64EC build.
-            - Source: wine-mirror ${{ inputs.wine_branch || 'wine-11.18' }}
-            - PE archs: ${{ inputs.archs || 'arm64ec' }}
-            - Toolchain: BCC wine-arm64ec-ubuntu2404 rootfs + llvm-mingw 20260908
-          files: /tmp/wine-arm64ec.tar.xz
+            自动编译版本。
+            [源码](https://github.com/as14725836/wine-termux/tree/${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }})
+          files: /tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.wcp
           draft: false
-          prerelease: true
+          prerelease: false
+
+      - name: Save current tag to cache file
+        if: steps.need_build.outputs.new_release == 'true'
+        run: |
+          cp .wine_current_tag .wine_last_tag
+      - name: Update tag cache
+        if: steps.need_build.outputs.new_release == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .wine_last_tag
+          key: wine-last-tag
