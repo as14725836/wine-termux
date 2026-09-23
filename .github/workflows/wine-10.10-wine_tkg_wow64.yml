@@ -1,4 +1,4 @@
-name: wine-10.10-wine Wine TkG wow64 (auto)
+name: Compile Wine TkG wow64 (auto)
 
 permissions:
   contents: write
@@ -373,6 +373,7 @@ jobs:
             msg2 "self-check dns: $(grep -c init_dns_config dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
             msg2 "self-check mfplat: $(grep -c resolver_create_default_handler dlls/mfplat/main.c 2>/dev/null || echo 0)"
             msg2 "self-check termux tmp: server.c=$(grep -c 'com.termux/files/usr/tmp' dlls/ntdll/unix/server.c 2>/dev/null || echo 0) request.c=$(grep -c 'com.termux/files/usr/tmp' server/request.c 2>/dev/null || echo 0) ndis.c=$(grep -c 'com.termux/files/usr/tmp' dlls/nsiproxy.sys/ndis.c 2>/dev/null || echo 0)"
+            msg2 "self-check 被跳过的补丁数: $(grep -c 'SKIPPED' "$_where"/prepare.log 2>/dev/null || echo 0)（详见 prepare.log）"
             # ---- user patches end ----
 
             popd &>/dev/null
@@ -396,6 +397,77 @@ jobs:
           grep -n "_termux_path_fix" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
+
+          # ---- TkG 的 hotfix（revert / cherry-pick）在自定义源码树上必然冲突，改成"跳过而不中断" ----
+          # 现象：prepare 阶段 git revert <上游提交> 冲突 -> "===> ERROR: Patch application has failed."
+          # 原因：TkG 的 hotfix 提交表是按最新 wine 编的，brunodev85 的树是 10.10 快照，
+          #       存在的锚点 revert 时上下文已被 Winlator 改过 -> 冲突。
+          if [ -f "$PREPARE_SH" ]; then
+            sed -i '/git revert -n --no-edit \$_committorevert/{s@.*@      if ! git revert -n --no-edit $_committorevert >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committorevert revert CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git revert --abort 2>/dev/null || true; fi@}' "$PREPARE_SH"
+            sed -i '/git cherry-pick -n --keep-redundant-commits \$_committocherrypick/{s@.*@      if ! git cherry-pick -n --keep-redundant-commits $_committocherrypick >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committocherrypick cherry-pick CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git cherry-pick --abort 2>/dev/null || true; fi@}' "$PREPARE_SH"
+            echo "===== hotfix 容错改写检查 ====="
+            grep -n 'CONFLICTED (custom tree)' "$PREPARE_SH" || echo "⚠️ 未匹配到 git revert/cherry-pick 行（TkG 版本可能变了，需人工确认）"
+          fi
+
+          # ---- 覆盖 TkG 的 nonuser_patcher：自定义源码树上打不上的补丁 -> 跳过而不是中断 ----
+          # 本次失败就是它：warframe-launcher.patch 在 10.10-custom 上打不上，
+          # non-makepkg-build.sh:226 的 4 处 `patch ... || (error ... && exit 1)` 直接终止了构建。
+          # 新版会先 dry-run：能干净应用才真打（不留半截补丁/.rej），打不上就跳过并记进 prepare.log。
+          if [ -f "$NMBS" ]; then
+            _ov=/tmp/ci_nonuser_override.sh
+            cat > "$_ov" << 'NONUSER_OVERRIDE_EOF'
+            ########################################################
+            # CI override: nonuser_patcher (tolerant for custom tree)
+            ########################################################
+            nonuser_patcher() {
+              if [ "$_NUKR" != "debug" ] || [[ "$_DEBUGANSW1" =~ [yY] ]]; then
+                if [ "$_nopatchmsg" != "true" ]; then
+                  _fullpatchmsg=" -- ( $_patchmsg )"
+                fi
+                msg2 "Applying ${_patchname}"
+                echo -e "\n${_patchname}${_fullpatchmsg}" >>"$_where"/prepare.log
+                local _f=""
+                if [ -n "$_patchpath" ]; then
+                  if [ -f "${_patchpath%/*}"/mainline/"$_patchname" ] || [ -f "${_patchpath%/*}"/mainline/legacy/"$_patchname" ]; then
+                    _patchpath="${_patchpath%/*}/mainline/"
+                  elif [ -f "${_patchpath%/*}"/staging/"$_patchname" ] || [ -f "${_patchpath%/*}"/staging/legacy/"$_patchname" ]; then
+                    _patchpath="${_patchpath%/*}/staging/"
+                  fi
+                  if [ -e "${_patchpath%/*}"/"$_patchname" ]; then
+                    _f="${_patchpath%/*}"/"$_patchname"
+                  elif [ -e "${_patchpath%/*}"/legacy/"$_patchname" ]; then
+                    _f="${_patchpath%/*}"/legacy/"$_patchname"
+                  elif [ -e "${_patchpath}"/legacy/"$_patchname" ]; then
+                    _f="${_patchpath}"/legacy/"$_patchname"
+                  elif [ -e "$_where"/"$_patchname" ]; then
+                    warning "Falling back to root dir patching"
+                    _f="$_where"/"$_patchname"
+                  fi
+                elif [ -e "$_where"/"$_patchname" ]; then
+                  _f="$_where"/"$_patchname"
+                fi
+                if [ -z "$_f" ]; then
+                  warning "Patch not found -- Skipping"
+                  return 0
+                fi
+                if patch -Np1 --dry-run <"$_f" >>"$_where"/prepare.log 2>&1; then
+                  if patch -Np1 <"$_f" >>"$_where"/prepare.log 2>&1; then
+                    echo -e "${_patchname}${_fullpatchmsg}" >>"$_where"/last_build_config.log
+                  else
+                    echo -e "\n${_patchname}: APPLY FAILED - SKIPPED" >>"$_where"/prepare.log
+                    warning "SKIP ${_patchname} (apply failed)"
+                  fi
+                else
+                  echo -e "\n${_patchname}: HUNKS DO NOT APPLY / already applied - SKIPPED${_fullpatchmsg}" >>"$_where"/prepare.log
+                  warning "SKIP ${_patchname} (hunks do not apply on custom tree)"
+                fi
+              fi
+            }
+          NONUSER_OVERRIDE_EOF
+            awk -v ov="$_ov" 'BEGIN{ while ((getline l < ov) > 0) o = o l "\n" } { if (!d && $0 ~ /^[[:space:]]*_script_main[[:space:]]*$/) { printf "%s", o; d=1 } print }' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+            echo "===== nonuser_patcher 覆盖检查（应出现 2 次定义，override 在后）====="
+            grep -n '^nonuser_patcher() {' "$NMBS" || echo "⚠️ 未找到 nonuser_patcher 定义"
+          fi
 
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
