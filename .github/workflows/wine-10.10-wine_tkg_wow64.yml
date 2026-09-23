@@ -263,7 +263,7 @@ jobs:
 
           # 1) 把 _termux_path_fix 函数追加到 prepare.sh 末尾
           echo "===== ci 文件检查 ====="
-          for _cif in termux_hook.sh nonuser_patcher.sh hotfixer_override.sh; do
+          for _cif in termux_hook.sh nonuser_patcher.sh hotfixer_override.sh versioning_fix.sh; do
             if [ ! -f "$CI_DIR/$_cif" ]; then
               echo "❌ 缺少 $CI_DIR/$_cif（仓库根目录需有 ci/ 目录，并随 cp -r "$GITHUB_WORKSPACE"/* 进 chroot）"
               exit 1
@@ -324,6 +324,14 @@ jobs:
               echo "⚠️ 未找到 $HFIX"
             fi
           fi
+          # ---- 版本信息文件纠正（自定义 fork 的 git history 不全，TkG 会选到不存在的文件）----
+          if [ ! -f "$CI_DIR/versioning_fix.sh" ]; then
+            echo "❌ 缺少 $CI_DIR/versioning_fix.sh"
+            exit 1
+          fi
+          awk -v fix="$CI_DIR/versioning_fix.sh" 'BEGIN{ while ((getline l < fix) > 0) o = o l "\n" } /Set custom version so that it reports the same as pkgver/ && !d { printf "%s", o; d=1 } { print }' "$PREPARE_SH" > "$PREPARE_SH.new" && mv "$PREPARE_SH.new" "$PREPARE_SH"
+          echo "===== 版本信息修正检查 ====="
+          grep -n 'CI: versioning path' "$PREPARE_SH" || echo "⚠️ 版本信息修正未插入"
 
           chmod +x ./non-makepkg-build.sh
           yes | ./non-makepkg-build.sh || exit 1
