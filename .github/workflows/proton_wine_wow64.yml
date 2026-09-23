@@ -178,6 +178,33 @@ jobs:
           export USE_CACHE=1
           source /tmp/x64.sh
 
+          # ==== C23 兼容（关键修复）====
+          # BCC(Arch) 自带的 GCC15+ 默认就是 -std=gnu23；C23 里 bool/true/false 是关键字，
+          # 而 wine 9.x 的 dlls/win32u/sysparams.c 把 "bool" 当成 union 成员名用，
+          # 于是编译报：
+          #   sysparams.c:405:34: error: two or more data types in declaration specifiers
+          #   sysparams.c:3985:65: error: expected identifier before 'bool'
+          # 强制回落到 C17（= gcc14 及更早的默认），unix 侧与 PE(mingw) 侧都要加。
+          echo "=== toolchain ==="
+          gcc --version | head -1 || true
+          x86_64-w64-mingw32-gcc --version | head -1 || true
+          export CFLAGS="\$CFLAGS -std=gnu17"
+          export CXXFLAGS="\$CXXFLAGS -std=gnu++17"
+          export CROSSCFLAGS="\$CROSSCFLAGS -std=gnu17"
+          export CROSSCXXFLAGS="\$CROSSCXXFLAGS -std=gnu++17"
+          echo "CFLAGS=\$CFLAGS"
+          echo "CROSSCFLAGS=\$CROSSCFLAGS"
+
+          # ==== 源码级兜底（与上游 wine 一致的做法：bool -> boolean）====
+          if [ -f dlls/win32u/sysparams.c ] && grep -q 'struct sysparam_bool_entry   bool;' dlls/win32u/sysparams.c; then
+            sed -i 's/struct sysparam_bool_entry   bool;/struct sysparam_bool_entry   boolean;/' dlls/win32u/sysparams.c
+            sed -i 's/->bool\./->boolean./g; s/\.bool = /\.boolean = /g' dlls/win32u/sysparams.c
+            echo "sysparams.c: union 成员 bool -> boolean 已改名（C23 兼容）"
+          else
+            echo "sysparams.c: 未找到该 union 成员，跳过（可能上游已修复）"
+          fi
+          sed -n '401,412p' dlls/win32u/sysparams.c || true
+
           # 应用 proton 补丁
           bash -x /tmp/patch.sh proton ${{ steps.wine_tag.outputs.version }} ${{ steps.wine_tag.outputs.wine_tag }} || exit 1
 
