@@ -1,0 +1,68 @@
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -743,6 +743,39 @@
+ }
+ 
+ 
++static BOOL import_name_has_high_bytes( const char *name, int len )
++{
++    int i;
++
++    for (i = 0; i < len; i++) if ((unsigned char)name[i] >= 0x80) return TRUE;
++    return FALSE;
++}
++
++/* Re-interpret a PE import name using a given codepage.
++ *
++ * build_import_name() only widens the import name byte per byte (Latin-1, see
++ * ascii_to_unicode()), so a DLL whose import name is stored in a legacy
++ * far-east codepage (GBK / SJIS / Big5 / ...) can never be found when the file
++ * itself is named in UTF-8 on the Unix side.
++ */
++static BOOL convert_import_name( UINT codepage, WCHAR *buffer, const char *import, int len, int *out_len )
++{
++    void *ptr;
++    SIZE_T size;
++    CPTABLEINFO info;
++    DWORD reslen;
++
++    if (len < 0 || len > 250) return FALSE;  /* keep room for a possible ".dll" */
++    if (NtGetNlsSectionPtr( 11, codepage, NULL, &ptr, &size )) return FALSE;
++    RtlInitCodePageTable( ptr, &info );
++    if (RtlCustomCPToUnicodeN( &info, buffer, 255 * sizeof(WCHAR), &reslen, import, len )) return FALSE;
++
++    buffer[reslen / sizeof(WCHAR)] = 0;
++    *out_len = reslen / sizeof(WCHAR);
++    return TRUE;
++}
++
++
+ /**********************************************************************
+  *	    build_import_name
+  */
+@@ -1164,6 +1197,25 @@
+ 
+     status = build_import_name( wm, buffer, name, len );
+     if (!status) status = load_dll( load_path, buffer, 0, &wmImp, system );
++
++    /* Wine only widens the import name byte per byte (Latin-1), so a DLL whose
++     * PE import name is encoded in a legacy far-east codepage is never found when
++     * the file is stored with its UTF-8 name on the Unix side. Retry the lookup
++     * with the usual codepages before giving up. */
++    if (status == STATUS_DLL_NOT_FOUND && import_name_has_high_bytes( name, len ))
++    {
++        static const UINT codepages[] = { 936, 950, 932, 949, 1252, 65001 };
++        unsigned int i;
++        int newlen;
++
++        for (i = 0; i < ARRAY_SIZE(codepages) && status == STATUS_DLL_NOT_FOUND; i++)
++        {
++            if (!convert_import_name( codepages[i], buffer, name, len, &newlen )) continue;
++            if (!wcschr( buffer, L'.' ) && newlen + 4 < 256) wcscpy( buffer + newlen, L".dll" );
++            status = load_dll( load_path, buffer, 0, &wmImp, system );
++            if (!status) TRACE( "import name resolved with codepage %u as %s", codepages[i], debugstr_w(buffer) );
++        }
++    }
+ 
+     if (status)
+     {
