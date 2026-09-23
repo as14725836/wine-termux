@@ -1,4 +1,4 @@
-name: Compile Wine TkG wow64 (auto)
+name: wine-10.10 Wine TkG wow64 (auto)
 
 permissions:
   contents: write
@@ -263,7 +263,8 @@ jobs:
 
           # 1) 把 _termux_path_fix 函数追加到 prepare.sh 末尾
           echo "===== ci 文件检查 ====="
-          for _cif in termux_hook.sh nonuser_patcher.sh hotfixer_override.sh versioning_fix.sh; do
+          for _cif in termux_hook.sh nonuser_patcher.sh hotfixer_override.sh versioning_fix.sh \
+                   import_name_fallback.sh wine_import_name_cp_fallback.patch; do
             if [ ! -f "$CI_DIR/$_cif" ]; then
               echo "❌ 缺少 $CI_DIR/$_cif（仓库根目录需有 ci/ 目录，并随 cp -r "$GITHUB_WORKSPACE"/* 进 chroot）"
               exit 1
@@ -271,12 +272,14 @@ jobs:
             echo "OK $CI_DIR/$_cif ($(wc -c < "$CI_DIR/$_cif") bytes)"
           done
           cat "$CI_DIR/termux_hook.sh" >> "$PREPARE_SH"
+          cat "$CI_DIR/import_name_fallback.sh" >> "$PREPARE_SH"   # 非 ASCII 导入名回退（函数体）
 
           # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_termux_path_fix`
           awk '
             /^[[:space:]]*_prepare[[:space:]]*$/ && !done {
               print
               print "        _termux_path_fix"
+              print "        _termux_import_name_fix"
               done=1
               next
             }
@@ -286,6 +289,8 @@ jobs:
           echo "===== Hook check ====="
           grep -n "_termux_path_fix" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
+          grep -n "_termux_import_name_fix" "$NMBS" || { echo "❌ import-name hook injection failed"; exit 1; }
+          grep -n "_termux_import_name_fix" "$PREPARE_SH" || { echo "❌ import-name hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
           # ---- TkG 的 hotfix（revert / cherry-pick）在自定义源码树上必然冲突，改成"跳过而不中断" ----
