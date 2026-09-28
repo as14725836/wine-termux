@@ -19,6 +19,15 @@ on:
         description: "Wine 源码仓库（默认 https://github.com/brunodev85/wine-10.10-custom.git）"
         required: false
         type: string
+
+      # ===================== 新增：指定 Wine 源码提交 =====================
+      source_commit:
+        description: "指定 Wine 源码提交；留空=HEAD，例如 a8559d7、a8559d7^、251b32d^"
+        required: false
+        type: string
+        default: ""
+      # ==================================================================
+
       use_staging:
         description: "叠加 wine-staging（自定义源码树建议关闭；开启时会自动设置 _staging_upstreamignore，避免回退掉自定义提交）"
         required: false
@@ -38,6 +47,7 @@ on:
         required: false
         type: boolean
         default: true
+
   schedule:
     - cron: "0 1 * * *"
 
@@ -60,6 +70,7 @@ jobs:
         id: wine-mirror
         env:
           ENABLE_MF: ${{ github.event.inputs.enable_mf || 'false' }}
+          SOURCE_COMMIT: ${{ github.event.inputs.source_commit || '' }}
         run: |
           src_repo="${{ env.WINE_SRC_REPO }}"
 
@@ -78,14 +89,24 @@ jobs:
             exit 1
           fi
 
-          echo "Source repo     : $src_repo"
-          echo "Wine version tag: $wine_tag"
-          echo "Source HEAD     : $src_sha"
+          echo "Source repo      : $src_repo"
+          echo "Wine version tag : $wine_tag"
+          echo "Source HEAD      : $src_sha"
+
+          if [ -n "$SOURCE_COMMIT" ]; then
+            echo "Source override  : $SOURCE_COMMIT"
+          else
+            echo "Source override  : <none, use HEAD>"
+          fi
+
           echo "$wine_tag@$src_sha" > .wine_current_tag
+
           echo "tag=$wine_tag" >> "$GITHUB_OUTPUT"
           echo "src_repo=$src_repo" >> "$GITHUB_OUTPUT"
           echo "src_sha=$src_sha" >> "$GITHUB_OUTPUT"
           echo "enable_mf=$ENABLE_MF" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+
       - name: Read last saved tag (if any)
         id: last
         run: |
@@ -96,16 +117,19 @@ jobs:
           fi
           echo "Last Wine tag: $last_tag"
           echo "tag=$last_tag" >> "$GITHUB_OUTPUT"
+
       - name: Compare tags and decide whether to run build
         id: need_build
         run: |
           event_name="${{ github.event_name }}"
+
           if [ "$event_name" = "workflow_dispatch" ]; then
             echo "Manual dispatch, force build."
             echo "new_release=true" >> "$GITHUB_OUTPUT"
           else
             current_tag="${{ steps.wine-mirror.outputs.tag }}"
             last_tag="${{ steps.last.outputs.tag }}"
+
             if [ "$current_tag" != "$last_tag" ]; then
               echo "New release detected: $current_tag (was $last_tag)"
               echo "new_release=true" >> "$GITHUB_OUTPUT"
@@ -114,16 +138,19 @@ jobs:
               echo "new_release=false" >> "$GITHUB_OUTPUT"
             fi
           fi
+
       - name: Set build variables
         if: steps.need_build.outputs.new_release == 'true'
         id: wine_tag
         run: |
           wine_tag="${{ steps.wine-mirror.outputs.tag }}"
           wine_ver="${wine_tag#wine-}"
+
           pkg_name="dxgi"
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
           fi
+
           echo "wine_tag=$wine_tag" >> "$GITHUB_OUTPUT"
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
@@ -131,34 +158,63 @@ jobs:
           echo "use_staging=${{ github.event.inputs.use_staging || 'false' }}" >> "$GITHUB_OUTPUT"
           echo "src_repo=${{ steps.wine-mirror.outputs.src_repo }}" >> "$GITHUB_OUTPUT"
           echo "src_sha=${{ steps.wine-mirror.outputs.src_sha }}" >> "$GITHUB_OUTPUT"
+
+          # ===================== 新增 =====================
+          echo "source_commit=${{ steps.wine-mirror.outputs.source_commit }}" >> "$GITHUB_OUTPUT"
+          # =================================================
+
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
         run: |
           echo "Using Wine tag: ${{ steps.wine_tag.outputs.wine_tag }}"
+
+          # ===================== 新增：显示提交选择 =====================
+          if [ -n "${{ steps.wine_tag.outputs.source_commit }}" ]; then
+            echo "========================================"
+            echo "Wine source commit override:"
+            echo "${{ steps.wine_tag.outputs.source_commit }}"
+            echo "========================================"
+          else
+            echo "Wine source commit override: <none, use HEAD>"
+          fi
+          # ============================================================
+
           cat > ~/.gitconfig << EOF
           [fetch]
             parallel = $(nproc)
           [submodule]
             fetchJobs = $(nproc)
           EOF
+
           tkg_branch="${{ github.event.inputs.tkg }}"
+
           if [ -z "$tkg_branch" ]; then
             git clone https://github.com/Frogging-Family/wine-tkg-git.git
           else
             git clone -b "$tkg_branch" https://github.com/Frogging-Family/wine-tkg-git.git
           fi
+
           cd /tmp
-          aria2c -s$(nproc) -x$(nproc) https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
-          sudo tar xf wine-bcc.tar.xz || { echo "❌ Extract failed"; exit 1; }
+
+          aria2c -s$(nproc) -x$(nproc) \
+            https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+
+          sudo tar xf wine-bcc.tar.xz || {
+            echo "❌ Extract failed"
+            exit 1
+          }
+
           if [ ! -d "archlinux" ]; then
             echo "❌ Expected 'archlinux' directory not found after extract!"
             exit 1
           fi
+
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
+
           echo "Creating /tmp/wine-termux directory with required scripts..."
           sudo mkdir -p /tmp/archlinux/tmp/wine-termux
-          
+
           if [ -f "$GITHUB_WORKSPACE/patch.sh" ]; then
             sudo cp "$GITHUB_WORKSPACE/patch.sh" /tmp/archlinux/tmp/wine-termux/
             echo "✅ Copied patch.sh"
@@ -166,7 +222,7 @@ jobs:
             echo "❌ patch.sh not found in repository root!"
             exit 1
           fi
-          
+
           if [ -f "$GITHUB_WORKSPACE/set-tkg-cfg.sh" ]; then
             sudo cp "$GITHUB_WORKSPACE/set-tkg-cfg.sh" /tmp/archlinux/tmp/wine-termux/
             echo "✅ Copied set-tkg-cfg.sh"
@@ -174,36 +230,57 @@ jobs:
             echo "❌ set-tkg-cfg.sh not found in repository root!"
             exit 1
           fi
-          
+
           sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
-          
+
           echo "Contents of /tmp/wine-termux:"
           sudo ls -la /tmp/archlinux/tmp/wine-termux/
+
           cat > build-wine.sh << 'EOF'
           #!/bin/bash
           set -e
+
           mkdir -p ~/.cache
+
           if [ ! -f /tmp/wine-termux/patch.sh ]; then
             echo "❌ /tmp/wine-termux/patch.sh not found!"
             exit 1
           fi
+
           if [ ! -f /tmp/wine-termux/set-tkg-cfg.sh ]; then
             echo "❌ /tmp/wine-termux/set-tkg-cfg.sh not found!"
             exit 1
           fi
+
           if [ -f /tmp/ccache.tar.xz ]; then
             echo "✅ Using cached ccache..."
             mkdir -p ~/.cache/ccache
             tar xvf /tmp/ccache.tar.xz -C ~/.cache/
           fi
+
           export USE_CACHE=1
           export ENABLE_PROTON_MF=${{ steps.wine-mirror.outputs.enable_mf }}
           export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
           export USE_STAGING=${{ steps.wine_tag.outputs.use_staging }}
+
+          # ===================== 新增 =====================
+          # 传入手动选择的 Git revision。
+          #
+          # 可以是：
+          #   a8559d7
+          #   a8559d7^
+          #   a8559d7~1
+          #   完整 SHA
+          #
+          # 留空则完全保持原来的 HEAD 行为。
+          export SOURCE_COMMIT='${{ steps.wine_tag.outputs.source_commit }}'
+          # =================================================
+
           cd /tmp/wine-tkg-git/wine-tkg-git/
 
           # ---- patch.sh 的 case 名与 workflow 里写的不一致（仓库里是 wine-tlg-auto），自动探测 ----
           PATCH_SH=/tmp/wine-termux/patch.sh
+
           if grep -qE '^[[:space:]]*wine-tkg-auto\)' "$PATCH_SH"; then
             PATCH_CASE=wine-tkg-auto
           elif grep -qE '^[[:space:]]*wine-tlg-auto\)' "$PATCH_SH"; then
@@ -213,37 +290,65 @@ jobs:
             echo "❌ patch.sh 里既没有 wine-tkg-auto 也没有 wine-tlg-auto"
             exit 1
           fi
-          bash -x "$PATCH_SH" "$PATCH_CASE" "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
-          bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
+
+          bash -x "$PATCH_SH" \
+            "$PATCH_CASE" \
+            "${{ steps.wine_tag.outputs.wine_tag }}" \
+            /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
+
+          bash -x /tmp/wine-termux/set-tkg-cfg.sh \
+            "${{ steps.wine_tag.outputs.wine_tag }}" \
+            /tmp/wine-tkg-git/wine-tkg-git || exit 1
 
           # ===================== 把 Wine 源码换成 brunodev85/wine-10.10-custom =====================
-          sed2cfg() {   # $1=key  $2=value  $3=cfg 文件
+          sed2cfg() {
+            # $1=key  $2=value  $3=cfg 文件
             local _f="$3"
+
             if grep -q "^$1=" "$_f"; then
               sed -i "s|^$1=.*|$1=\"$2\"|" "$_f"
             else
               echo "$1=\"$2\"" >> "$_f"
             fi
           }
+
           CFG_BASIC=customization.cfg
           CFG_ADV=wine-tkg-profiles/advanced-customization.cfg
-          sed2cfg _custom_wine_source "${{ steps.wine_tag.outputs.src_repo }}" "$CFG_ADV"
-          # 该 fork 只有 main 分支、没有任何 tag；且自定义树里不存在 wine-staging 记录的上游提交。
+
+          sed2cfg _custom_wine_source \
+            "${{ steps.wine_tag.outputs.src_repo }}" \
+            "$CFG_ADV"
+
+          # 该 fork 只有 main 分支、没有任何 tag；
+          # 且自定义树里不存在 wine-staging 记录的上游提交。
           # 必须禁止 TkG 额外 checkout 别的 ref，否则会把 brunodev85 的自定义提交丢掉。
           sed2cfg _staging_upstreamignore "true" "$CFG_ADV"
+
           sed2cfg _plain_version "" "$CFG_BASIC"
+
           if [ "$USE_STAGING" = "true" ]; then
             sed2cfg _use_staging "true" "$CFG_BASIC"
           else
             sed2cfg _use_staging "false" "$CFG_BASIC"
           fi
+
           echo "===== 生效的源码相关配置 ====="
-          grep -nE '^_(custom_wine_source|staging_upstreamignore|staging_version|plain_version|use_staging|use_esync|use_fsync|NOLIB32)=' "$CFG_BASIC" "$CFG_ADV" 2>/dev/null || true
+
+          grep -nE \
+            '^_(custom_wine_source|staging_upstreamignore|staging_version|plain_version|use_staging|use_esync|use_fsync|NOLIB32)=' \
+            "$CFG_BASIC" "$CFG_ADV" 2>/dev/null || true
+
           if [ "$ENABLE_ESYNC" = "false" ]; then
             echo "⚠️ esync 已手动禁用，将关闭 _use_esync"
-            sed -i 's/^_use_esync=.*/_use_esync="false"/' customization.cfg
-            grep -q '^_use_esync=' customization.cfg || echo '_use_esync="false"' >> customization.cfg
+
+            sed -i \
+              's/^_use_esync=.*/_use_esync="false"/' \
+              customization.cfg
+
+            grep -q '^_use_esync=' customization.cfg ||
+              echo '_use_esync="false"' >> customization.cfg
           fi
+
           echo '_ci_build="true"' >> customization.cfg
 
           # ===================== Termux 路径修复 hook 开始 =====================
@@ -256,6 +361,7 @@ jobs:
             echo "❌ prepare.sh not found: $PREPARE_SH"
             exit 1
           fi
+
           if [ ! -f "$NMBS" ]; then
             echo "❌ non-makepkg-build.sh not found: $NMBS"
             exit 1
@@ -263,16 +369,152 @@ jobs:
 
           # 1) 把 _termux_path_fix 函数追加到 prepare.sh 末尾
           echo "===== ci 文件检查 ====="
-          for _cif in termux_hook.sh nonuser_patcher.sh hotfixer_override.sh versioning_fix.sh \
-                   import_name_fallback.sh wine_import_name_cp_fallback.patch; do
+
+          for _cif in \
+            termux_hook.sh \
+            nonuser_patcher.sh \
+            hotfixer_override.sh \
+            versioning_fix.sh \
+            import_name_fallback.sh \
+            wine_import_name_cp_fallback.patch; do
+
             if [ ! -f "$CI_DIR/$_cif" ]; then
-              echo "❌ 缺少 $CI_DIR/$_cif（仓库根目录需有 ci/ 目录，并随 cp -r "$GITHUB_WORKSPACE"/* 进 chroot）"
+              echo "❌ 缺少 $CI_DIR/$_cif（仓库根目录需有 ci/ 目录，并随 cp -r \"$GITHUB_WORKSPACE\"/* 进 chroot）"
               exit 1
             fi
+
             echo "OK $CI_DIR/$_cif ($(wc -c < "$CI_DIR/$_cif") bytes)"
           done
+
           cat "$CI_DIR/termux_hook.sh" >> "$PREPARE_SH"
-          cat "$CI_DIR/import_name_fallback.sh" >> "$PREPARE_SH"   # 非 ASCII 导入名回退（函数体）
+          cat "$CI_DIR/import_name_fallback.sh" >> "$PREPARE_SH"
+
+          # ===================== 新增：Wine 源码提交选择 hook =====================
+          #
+          # 这里把函数追加到 prepare.sh。
+          #
+          # 真正调用的位置在 _src_init 后面。
+          #
+          # 这样：
+          #
+          #   1. TkG 先 clone _custom_wine_source
+          #   2. _src_init 完成
+          #   3. 我们 checkout 指定 revision
+          #   4. 后面的 TkG patch / hotfix 在选定 revision 上继续工作
+          #
+          # 因此不是 git revert，而是真正的：
+          #
+          #   git checkout a8559d7
+          #   git checkout a8559d7^
+          #
+          # =====================================================================
+
+          cat >> "$PREPARE_SH" << 'EOF'
+
+          # ===================== Wine source commit override =====================
+          _termux_source_commit_checkout()
+          {
+              local _requested="${SOURCE_COMMIT:-}"
+
+              # 没有指定 revision：
+              # 完全保持 TkG 原来的行为。
+              if [ -z "$_requested" ]; then
+                  echo "===> SOURCE_COMMIT not specified; using normal TkG source revision."
+                  return 0
+              fi
+
+              echo
+              echo "============================================================"
+              echo " Wine source commit override"
+              echo "============================================================"
+              echo "Requested revision: $_requested"
+
+              # _srcdir 是 TkG _src_init() 使用的实际 Wine 源码目录。
+              if [ -z "${_srcdir:-}" ]; then
+                  echo "❌ _srcdir is not set"
+                  return 1
+              fi
+
+              if [ ! -d "$_srcdir" ]; then
+                  echo "❌ Wine source directory does not exist:"
+                  echo "   $_srcdir"
+                  return 1
+              fi
+
+              cd "$_srcdir" || return 1
+
+              if [ ! -d ".git" ]; then
+                  echo "❌ Wine source is not a Git repository:"
+                  echo "   $_srcdir"
+                  return 1
+              fi
+
+              echo "Source directory: $_srcdir"
+
+              # 某些 TkG clone/fetch 可能是 shallow repository。
+              # a8559d7^ / a8559d7~1 需要父提交可见，所以必要时补全历史。
+              if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+                  echo "Repository is shallow; fetching complete history..."
+                  git fetch --unshallow origin
+              fi
+
+              # 确保 tags / remote refs 可用于解析 revision。
+              git fetch origin --tags --force >/dev/null 2>&1 || true
+
+              echo
+              echo "Current source revision:"
+              git log -1 --oneline || true
+
+              echo
+              echo "Resolving revision:"
+              echo "  $_requested"
+
+              if ! git rev-parse --verify "${_requested}^{commit}" >/dev/null 2>&1; then
+                  echo
+                  echo "❌ Cannot resolve Wine source revision:"
+                  echo "   $_requested"
+                  echo
+                  echo "Available recent commits:"
+                  git log --oneline -20 || true
+                  echo
+                  return 1
+              fi
+
+              local _resolved
+              _resolved="$(git rev-parse --verify "${_requested}^{commit}")"
+
+              echo
+              echo "Resolved revision:"
+              echo "  $_resolved"
+
+              echo
+              echo "Commit subject:"
+              git show -s --format='%s' "$_resolved"
+
+              echo
+              echo "Checking out selected revision..."
+
+              # 清理 TkG 在 checkout 前可能留下的未提交修改。
+              git reset --hard
+              git clean -fd
+
+              # 真正的源码版本切换。
+              git checkout --detach "$_resolved"
+
+              echo
+              echo "============================================================"
+              echo " Final selected Wine source"
+              echo "============================================================"
+              echo "Requested : $_requested"
+              echo "Resolved  : $(git rev-parse HEAD)"
+              echo "Date      : $(git show -s --format='%ci' HEAD)"
+              echo "Subject   : $(git show -s --format='%s' HEAD)"
+              echo "============================================================"
+              echo
+          }
+          # ===================== Wine source commit override end =================
+
+          EOF
 
           # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_termux_path_fix`
           awk '
@@ -287,68 +529,208 @@ jobs:
           ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
 
           echo "===== Hook check ====="
-          grep -n "_termux_path_fix" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
-          grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
-          grep -n "_termux_import_name_fix" "$NMBS" || { echo "❌ import-name hook injection failed"; exit 1; }
-          grep -n "_termux_import_name_fix" "$PREPARE_SH" || { echo "❌ import-name hook function missing"; exit 1; }
+
+          grep -n "_termux_path_fix" "$NMBS" ||
+            { echo "❌ Hook injection failed"; exit 1; }
+
+          grep -n "_termux_path_fix" "$PREPARE_SH" ||
+            { echo "❌ Hook function missing"; exit 1; }
+
+          grep -n "_termux_import_name_fix" "$NMBS" ||
+            { echo "❌ import-name hook injection failed"; exit 1; }
+
+          grep -n "_termux_import_name_fix" "$PREPARE_SH" ||
+            { echo "❌ import-name hook function missing"; exit 1; }
+
+          # ===================== 新增 hook 调用 =====================
+          #
+          # 在 TkG 的 _src_init 完成后立即 checkout。
+          #
+          # 不改变原来的 _prepare / _termux_path_fix 逻辑。
+          #
+          # ==========================================================
+
+          echo "===== Source commit hook injection ====="
+
+          if grep -qE '^[[:space:]]*_src_init[[:space:]]*$' "$PREPARE_SH"; then
+
+            awk '
+              /^[[:space:]]*_src_init[[:space:]]*$/ && !done {
+                print
+                print "        _termux_source_commit_checkout"
+                done=1
+                next
+              }
+              { print }
+              END {
+                if (!done)
+                  exit 10
+              }
+            ' "$PREPARE_SH" > "$PREPARE_SH.new"
+
+            mv "$PREPARE_SH.new" "$PREPARE_SH"
+
+          else
+            echo "❌ Could not find _src_init invocation in prepare.sh"
+            echo
+            echo "Searching prepare.sh:"
+            grep -nE 'src_init|_prepare' "$PREPARE_SH" | head -100 || true
+            exit 1
+          fi
+
+          echo "===== Source commit hook check ====="
+
+          grep -n "_termux_source_commit_checkout" "$PREPARE_SH" ||
+            {
+              echo "❌ Source commit hook injection failed"
+              exit 1
+            }
+
+          if [ -n "$SOURCE_COMMIT" ]; then
+            echo
+            echo "========================================"
+            echo "Requested Wine source revision:"
+            echo "  $SOURCE_COMMIT"
+            echo "========================================"
+          else
+            echo
+            echo "Wine source revision override disabled."
+            echo "TkG will use its normal source revision."
+          fi
+
           # ===================== Termux 路径修复 hook 结束 =====================
 
           # ---- TkG 的 hotfix（revert / cherry-pick）在自定义源码树上必然冲突，改成"跳过而不中断" ----
+          #
           # 现象：prepare 阶段 git revert <上游提交> 冲突 -> "===> ERROR: Patch application has failed."
+          #
           # 原因：TkG 的 hotfix 提交表是按最新 wine 编的，brunodev85 的树是 10.10 快照，
           #       存在的锚点 revert 时上下文已被 Winlator 改过 -> 冲突。
+          #
           if [ -f "$PREPARE_SH" ]; then
-            sed -i '/git revert -n --no-edit \$_committorevert/{s@.*@      if ! git revert -n --no-edit $_committorevert >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committorevert revert CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git revert --abort 2>/dev/null || true; fi@}' "$PREPARE_SH"
-            sed -i '/git cherry-pick -n --keep-redundant-commits \$_committocherrypick/{s@.*@      if ! git cherry-pick -n --keep-redundant-commits $_committocherrypick >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committocherrypick cherry-pick CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git cherry-pick --abort 2>/dev/null || true; fi@}' "$PREPARE_SH"
+
+            sed -i \
+              '/git revert -n --no-edit \$_committorevert/{s@.*@      if ! git revert -n --no-edit $_committorevert >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committorevert revert CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git revert --abort 2>/dev/null || true; fi@}' \
+              "$PREPARE_SH"
+
+            sed -i \
+              '/git cherry-pick -n --keep-redundant-commits \$_committocherrypick/{s@.*@      if ! git cherry-pick -n --keep-redundant-commits $_committocherrypick >> "$_where"/prepare.log 2>\&1; then echo -e "\\n$_committocherrypick cherry-pick CONFLICTED (custom tree) - skipped: $_hotfixmsg" >> "$_where"/prepare.log; git cherry-pick --abort 2>/dev/null || true; fi@}' \
+              "$PREPARE_SH"
+
             echo "===== hotfix 容错改写检查 ====="
-            grep -n 'CONFLICTED (custom tree)' "$PREPARE_SH" || echo "⚠️ 未匹配到 git revert/cherry-pick 行（TkG 版本可能变了，需人工确认）"
+
+            grep -n 'CONFLICTED (custom tree)' "$PREPARE_SH" ||
+              echo "⚠️ 未匹配到 git revert/cherry-pick 行（TkG 版本可能变了，需人工确认）"
           fi
 
           # ---- 覆盖 TkG 的 nonuser_patcher：自定义源码树上打不上的补丁 -> 跳过而不是中断 ----
+          #
           # 本次失败就是它：warframe-launcher.patch 在 10.10-custom 上打不上，
           # non-makepkg-build.sh:226 的 4 处 `patch ... || (error ... && exit 1)` 直接终止了构建。
-          # 新版会先 dry-run：能干净应用才真打（不留半截补丁/.rej），打不上就跳过并记进 prepare.log。
+          #
+          # 新版会先 dry-run：能干净应用才真打（不留半截补丁/.rej），
+          # 打不上就跳过并记进 prepare.log。
+          #
           if [ -f "$NMBS" ]; then
+
             _ov=/tmp/ci_nonuser_override.sh
-          # 容错版 nonuser_patcher / user_patcher（内容在 ci/nonuser_patcher.sh）
-          cp "$CI_DIR/nonuser_patcher.sh" "$_ov"
-            awk -v ov="$_ov" 'BEGIN{ while ((getline l < ov) > 0) o = o l "\n" } { if (!d && $0 ~ /^[[:space:]]*_script_main[[:space:]]*$/) { printf "%s", o; d=1 } print }' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+
+            # 容错版 nonuser_patcher / user_patcher（内容在 ci/nonuser_patcher.sh）
+            cp "$CI_DIR/nonuser_patcher.sh" "$_ov"
+
+            awk \
+              -v ov="$_ov" \
+              'BEGIN {
+                 while ((getline l < ov) > 0)
+                   o = o l "\n"
+               }
+               {
+                 if (!d && $0 ~ /^[[:space:]]*_script_main[[:space:]]*$/) {
+                   printf "%s", o
+                   d=1
+                 }
+                 print
+               }' \
+              "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+
             echo "===== 覆盖检查（应有 4 个非零结果；override 均带缩进）====="
-            grep -nE '^[[:space:]]*nonuser_patcher\(\)' "$NMBS" || echo "⚠️ 未找到 nonuser_patcher 定义"
-            grep -nE '^[[:space:]]*user_patcher\(\)' "$NMBS" || echo "⚠️ 未找到 user_patcher 定义"
+
+            grep -nE '^[[:space:]]*nonuser_patcher\(\)' "$NMBS" ||
+              echo "⚠️ 未找到 nonuser_patcher 定义"
+
+            grep -nE '^[[:space:]]*user_patcher\(\)' "$NMBS" ||
+              echo "⚠️ 未找到 user_patcher 定义"
 
             # ---- hotfixer():它定义在 wine-tkg-patches/hotfixes/hotfixer 里（source 进来的），
             # 自己直接 patch 且失败即 error+exit1（本次就是它在 autoconf-legacy-fix.mypatch 上退出）。
+            #
             # 同文件内后定义者胜，所以在文件末尾追加容错版即可覆盖。
+            #
             HFIX="$TKG_DIR/wine-tkg-patches/hotfixes/hotfixer"
+
             if [ -f "$HFIX" ]; then
-          # 容错版 hotfixer()（内容在 ci/hotfixer_override.sh）
-          cat "$CI_DIR/hotfixer_override.sh" >> "$HFIX"
-              grep -nE '^[[:space:]]*hotfixer\(\)' "$HFIX" || echo "⚠️ hotfixer 覆盖失败"
+
+              # 容错版 hotfixer()（内容在 ci/hotfixer_override.sh）
+              cat "$CI_DIR/hotfixer_override.sh" >> "$HFIX"
+
+              grep -nE '^[[:space:]]*hotfixer\(\)' "$HFIX" ||
+                echo "⚠️ hotfixer 覆盖失败"
+
             else
               echo "⚠️ 未找到 $HFIX"
             fi
           fi
+
           # ---- 版本信息文件纠正（自定义 fork 的 git history 不全，TkG 会选到不存在的文件）----
           if [ ! -f "$CI_DIR/versioning_fix.sh" ]; then
             echo "❌ 缺少 $CI_DIR/versioning_fix.sh"
             exit 1
           fi
-          awk -v fix="$CI_DIR/versioning_fix.sh" 'BEGIN{ while ((getline l < fix) > 0) o = o l "\n" } /Set custom version so that it reports the same as pkgver/ && !d { printf "%s", o; d=1 } { print }' "$PREPARE_SH" > "$PREPARE_SH.new" && mv "$PREPARE_SH.new" "$PREPARE_SH"
+
+          awk \
+            -v fix="$CI_DIR/versioning_fix.sh" \
+            'BEGIN {
+               while ((getline l < fix) > 0)
+                 o = o l "\n"
+             }
+             /Set custom version so that it reports the same as pkgver/ && !d {
+               printf "%s", o
+               d=1
+             }
+             {
+               print
+             }' \
+            "$PREPARE_SH" > "$PREPARE_SH.new" && mv "$PREPARE_SH.new" "$PREPARE_SH"
+
           echo "===== 版本信息修正检查 ====="
-          grep -n 'CI: versioning path' "$PREPARE_SH" || echo "⚠️ 版本信息修正未插入"
+
+          grep -n 'CI: versioning path' "$PREPARE_SH" ||
+            echo "⚠️ 版本信息修正未插入"
 
           chmod +x ./non-makepkg-build.sh
+
           yes | ./non-makepkg-build.sh || exit 1
+
           cd /tmp/output/
-          tar -I 'xz -T$(nproc) -9' -cvf "/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz" */
+
+          tar -I 'xz -T$(nproc) -9' \
+            -cvf \
+            "/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz"
+
           cd ~/.cache/
+
           rm -rf /tmp/ccache.tar.xz
-          tar -I 'xz -T$(nproc)' -cvf /tmp/ccache.tar.xz ccache
+
+          tar -I 'xz -T$(nproc)' \
+            -cvf /tmp/ccache.tar.xz \
+            ccache
+
           echo "✅ Build completed and ccache archived."
           EOF
+
           sudo chmod +x build-wine.sh
           sudo mv build-wine.sh archlinux/bin/build-wine.sh
+
       - name: Restore ccache
         if: steps.need_build.outputs.new_release == 'true'
         uses: actions/cache/restore@v5
@@ -357,19 +739,28 @@ jobs:
           key: wine-tkg-ccache-Linux-x86_64
           restore-keys: |
             wine-tkg-ccache-Linux-x86_64
+
       - name: Compile Using BCC Chroot
         if: steps.need_build.outputs.new_release == 'true'
         run: |
           cd /tmp
+
           bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+
           sudo chroot archlinux /bin/build-wine.sh
+
           bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+
           if [ ! -f "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz" ]; then
             echo "❌ Build output not found!"
             exit 1
           fi
-          sudo chmod 644 "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz"
+
+          sudo chmod 644 \
+            "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz"
+
           sudo chmod 644 /tmp/archlinux/tmp/ccache.tar.xz
+
       - name: Save ccache
         if: steps.need_build.outputs.new_release == 'true' && github.run_attempt == 1
         uses: actions/cache/save@v5
@@ -383,27 +774,48 @@ jobs:
           # 自定义源码时目录名由 TkG 的 _src_init() 推导
           # (brunodev85/wine-10.10-custom.git -> brunodev85-wine-10-10-customgit)，不能写死 wine-git
           src_dir="$(find /tmp/archlinux/tmp/wine-tkg/src -maxdepth 1 -type d -name '*wine*' ! -name '*staging*' | head -n 1)"
+
           if [ -z "$src_dir" ] || [ ! -d "$src_dir" ]; then
             echo "❌ Source directory not found under /tmp/archlinux/tmp/wine-tkg/src"
             ls -la /tmp/archlinux/tmp/wine-tkg/src || true
             exit 1
           fi
+
           echo "Using source dir: $src_dir"
+
           sudo chown -R $USER:$USER "$src_dir"
+
           cd "$src_dir"
-          sudo cp -r -p /tmp/archlinux/tmp/output/*/share/wine/wine-tkg-config.txt .
+
+          sudo cp -r -p \
+            /tmp/archlinux/tmp/output/*/share/wine/wine-tkg-config.txt \
+            .
+
           sudo chmod 644 wine-tkg-config.txt
+
           sudo rm -rf .git
+
           cd "$src_dir"
+
           git init
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           branch_name="${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}"
+
           git checkout -b "$branch_name"
+
           git add .
-          git commit -m "Auto-commit source for ${{ steps.wine_tag.outputs.wine_tag }} (PKG: ${{ steps.wine_tag.outputs.PKG_NAME }})"
-          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/as14725836/wine-termux.git
+
+          git commit \
+            -m "Auto-commit source for ${{ steps.wine_tag.outputs.wine_tag }} (PKG: ${{ steps.wine_tag.outputs.PKG_NAME }})"
+
+          git remote add origin \
+            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/as14725836/wine-termux.git
+
           git push -f --set-upstream origin "$branch_name"
+
       - name: Create GitHub Release
         if: steps.need_build.outputs.new_release == 'true'
         uses: softprops/action-gh-release@v2
@@ -413,9 +825,21 @@ jobs:
           target_commitish: ${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}
           tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}
           name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME == 'mf' && 'mf' || 'dxgi' }}) TkG Staging GE
+
           body: |
             自动编译版本。
+
+            Wine 源码仓库：
+            ${{ steps.wine_tag.outputs.src_repo }}
+
+            Wine 源码 HEAD：
+            ${{ steps.wine_tag.outputs.src_sha }}
+
+            指定源码提交：
+            ${{ steps.wine_tag.outputs.source_commit || 'HEAD' }}
+
             [源码](https://github.com/as14725836/wine-termux/tree/${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }})
+
           files: /tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz
           draft: false
           prerelease: false
@@ -424,6 +848,7 @@ jobs:
         if: steps.need_build.outputs.new_release == 'true'
         run: |
           cp .wine_current_tag .wine_last_tag
+
       - name: Update tag cache
         if: steps.need_build.outputs.new_release == 'true'
         uses: actions/cache@v4
