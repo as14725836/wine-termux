@@ -15,7 +15,7 @@ on:
       build_name:
         description: 'Proton build name'
         required: true
-        default: 'proton-arm64ec-termux'
+        default: 'protonwine'
 
       unstripped:
         description: 'Build without stripping symbols'
@@ -32,33 +32,13 @@ on:
     - cron: '0 0 1,15 * *'
 
 env:
-  # ============================================================
-  # Valve Proton
-  # ============================================================
-
   PROTON_REPO: https://github.com/ValveSoftware/Proton.git
-
   PROTON_REF: ${{ inputs.proton_ref || 'proton_11.0' }}
-
-  BUILD_NAME: ${{ inputs.build_name || 'proton-arm64ec-termux' }}
-
-  # ============================================================
-  # ccache
-  # ============================================================
-
+  BUILD_NAME: ${{ inputs.build_name || 'protonwine' }}
   CCACHE_DIR: ${{ github.workspace }}/.ccache
-
-  # ============================================================
-  # Valve ARM64 SteamRT SDK
-  # ============================================================
-
   STEAMRT_IMAGE: registry.gitlab.steamos.cloud/proton/steamrt4/sdk/arm64-llvm:4.0.20260331.220802-2
 
 jobs:
-
-  # ==============================================================
-  # BUILD
-  # ==============================================================
 
   build:
 
@@ -83,30 +63,19 @@ jobs:
           echo "HOST INFORMATION"
           echo "========================================"
 
-          echo
-          echo "Kernel:"
           uname -a
-
           echo
-          echo "Architecture:"
           uname -m
-
           echo
-          echo "CPU:"
           nproc
-
           lscpu || true
-
           echo
-          echo "Memory:"
           free -h
-
           echo
-          echo "Disk:"
           df -h
 
       # ============================================================
-      # Checkout workflow repository
+      # Checkout
       # ============================================================
 
       - name: Checkout
@@ -129,19 +98,10 @@ jobs:
             exit 1
           fi
 
-          echo
-          echo "ARM64 runner confirmed:"
-          echo "$ARCH"
+          echo "ARM64 runner confirmed: $ARCH"
 
       # ============================================================
       # Install host dependencies
-      #
-      # IMPORTANT:
-      #
-      # Do NOT install docker.io.
-      #
-      # GitHub ARM runner already provides Docker.
-      # Installing docker.io can conflict with containerd.io.
       # ============================================================
 
       - name: Install host dependencies
@@ -166,7 +126,9 @@ jobs:
             python3 \
             python3-pip \
             ccache \
-            build-essential
+            build-essential \
+            llvm \
+            patchelf
 
           sudo apt-get clean
 
@@ -179,24 +141,12 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "DOCKER"
-          echo "========================================"
-
           command -v docker
-
           docker --version
-
           echo
-          echo "Docker info:"
-
           docker info
-
           echo
-          echo "Docker server architecture:"
-
-          docker version \
-            --format '{{.Server.Arch}}'
+          docker version --format '{{.Server.Arch}}'
 
       # ============================================================
       # Restore ccache
@@ -224,26 +174,13 @@ jobs:
 
           mkdir -p "$CCACHE_DIR"
 
-          echo "========================================"
-          echo "CCACHE"
-          echo "========================================"
-
           ccache --version
-
-          ccache \
-            --set-config=cache_dir="$CCACHE_DIR"
-
-          ccache \
-            --set-config=max_size=5G
-
-          ccache \
-            --set-config=compression=true
-
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
           ccache -z
 
-          echo
-          echo "CCACHE_DIR:"
-          echo "$CCACHE_DIR"
+          echo "CCACHE_DIR: $CCACHE_DIR"
 
       # ============================================================
       # Clone Valve Proton
@@ -254,13 +191,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          rm -rf \
-            proton \
-            proton-build
-
-          echo "========================================"
-          echo "CLONE VALVE PROTON"
-          echo "========================================"
+          rm -rf proton proton-build
 
           git clone \
             --filter=blob:none \
@@ -283,80 +214,162 @@ jobs:
             --init \
             --recursive
 
-          echo
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Version: $(git describe --always --tags --dirty || true)"
+          echo "Ref: $PROTON_REF"
+
+      # ============================================================
+      # Patch Wine source: /tmp -> Termux tmp
+      # ============================================================
+
+      - name: Patch Wine source (/tmp -> Termux tmp)
+        working-directory: proton
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TERMUX_TMP="/data/data/com.termux/files/usr/tmp"
+
           echo "========================================"
-          echo "PROTON REVISION"
+          echo "PATCH WINE /tmp -> $TERMUX_TMP"
           echo "========================================"
 
-          echo "Commit:"
+          WINE_DIR=""
+          for cand in \
+            subprojects/wine \
+            wine \
+            subprojects/wine-proton ; do
+            if [ -d "$cand" ]; then
+              WINE_DIR="$cand"
+              break
+            fi
+          done
 
-          git rev-parse HEAD
+          if [ -z "$WINE_DIR" ]; then
+            echo "::error::Wine source directory not found."
+            echo "Looked for: subprojects/wine, wine, subprojects/wine-proton"
+            ls -la subprojects/ || true
+            exit 1
+          fi
+
+          echo "Wine source: $WINE_DIR"
 
           echo
-          echo "Version:"
+          echo "BEFORE: /tmp occurrences"
 
-          git describe \
-            --always \
-            --tags \
-            --dirty \
-            || true
+          BEFORE_COUNT="$(
+            find "$WINE_DIR" \
+              -type f \
+              \( -name '*.c' -o -name '*.h' -o -name '*.in' -o -name '*.spec' \) \
+              -exec grep -l '/tmp' {} \; \
+              | wc -l
+          )"
+
+          echo "Files containing /tmp: $BEFORE_COUNT"
 
           echo
-          echo "Ref:"
-          echo "$PROTON_REF"
+          echo "PATCH 1: /tmp/ -> $TERMUX_TMP/"
+
+          find "$WINE_DIR" \
+            -type f \
+            \( -name '*.c' -o -name '*.h' -o -name '*.in' -o -name '*.spec' \) \
+            -exec grep -l '/tmp' {} \; \
+            | xargs -r \
+              sed -i "s|/tmp/|${TERMUX_TMP}/|g"
+
+          echo
+          echo "PATCH 2: \"/tmp\" -> \"$TERMUX_TMP\""
+
+          find "$WINE_DIR" \
+            -type f \
+            \( -name '*.c' -o -name '*.h' -o -name '*.in' -o -name '*.spec' \) \
+            -exec grep -l '"/tmp"' {} \; \
+            | xargs -r \
+              sed -i "s|\"/tmp\"|\"${TERMUX_TMP}\"|g"
+
+          echo
+          echo "PATCH 3: server/ directory"
+
+          if [ -d "$WINE_DIR/server" ]; then
+            find "$WINE_DIR/server" \
+              -type f \
+              \( -name '*.c' -o -name '*.h' \) \
+              -exec sed -i \
+                "s|\"/tmp\"|\"${TERMUX_TMP}\"|g" {} + \
+              || true
+          else
+            echo "warn: $WINE_DIR/server not found"
+          fi
+
+          echo
+          echo "PATCH 4: file.c / loader.c / server.c"
+
+          for fname in file.c loader.c server.c; do
+            find "$WINE_DIR" \
+              -name "$fname" \
+              -type f \
+              -exec sed -i \
+                "s|\"/tmp\"|\"${TERMUX_TMP}\"|g" {} + \
+              2>/dev/null || true
+          done
+
+          echo
+          echo "AFTER: remaining /tmp occurrences"
+
+          REMAINING="$(
+            find "$WINE_DIR" \
+              -type f \
+              \( -name '*.c' -o -name '*.h' -o -name '*.in' -o -name '*.spec' \) \
+              -exec grep -l '/tmp' {} \; \
+              | sort
+          )"
+
+          if [ -z "$REMAINING" ]; then
+            echo "No /tmp references remaining in Wine source."
+          else
+            echo "Files still containing /tmp:"
+            echo "$REMAINING"
+
+            echo
+            echo "Remaining /tmp lines (first 200):"
+            echo "$REMAINING" \
+              | while read -r f; do
+                  grep -n '/tmp' "$f" || true
+                done \
+              | awk 'NR<=200'
+          fi
 
       # ============================================================
       # Verify Valve ARM64 source
       # ============================================================
 
       - name: Verify Valve ARM64 source
+        working-directory: proton
         shell: bash
         run: |
           set -euxo pipefail
 
-          cd proton
-
-          echo "========================================"
-          echo "VALVE ARM64 SOURCE CHECK"
-          echo "========================================"
-
-          echo
           echo "TARGET_ARCH:"
           grep -n -m 50 'TARGET_ARCH' Makefile.in || true
 
           echo
-          echo "========================================"
-          echo "AARCH64 UNIX"
-          echo "========================================"
-
+          echo "AARCH64 UNIX:"
           grep -n -m 30 'aarch64-unix' Makefile.in || true
 
           echo
-          echo "========================================"
-          echo "AARCH64 WINDOWS"
-          echo "========================================"
-
+          echo "AARCH64 WINDOWS:"
           grep -n -m 30 'aarch64-windows' Makefile.in || true
 
           echo
-          echo "========================================"
-          echo "ARM64EC WINDOWS"
-          echo "========================================"
-
+          echo "ARM64EC WINDOWS:"
           grep -n -m 50 'arm64ec-windows' Makefile.in || true
 
           echo
-          echo "========================================"
-          echo "FEX AARCH64"
-          echo "========================================"
-
+          echo "FEX AARCH64:"
           grep -n -m 30 'FEX_aarch64' Makefile.in || true
 
           echo
-          echo "========================================"
-          echo "FEX ARM64EC"
-          echo "========================================"
-
+          echo "FEX ARM64EC:"
           grep -n -m 30 'FEX_arm64ec' Makefile.in || true
 
       # ============================================================
@@ -369,14 +382,9 @@ jobs:
           set -euxo pipefail
 
           rm -rf proton-build
-
           mkdir -p proton-build
 
           cd proton-build
-
-          echo "========================================"
-          echo "CONFIGURE PROTON"
-          echo "========================================"
 
           ../proton/configure.sh \
             --target-arch=arm64 \
@@ -385,19 +393,6 @@ jobs:
 
       # ============================================================
       # Inspect generated configuration
-      #
-      # IMPORTANT:
-      #
-      # get-steamrt-image prints the recipe itself because make
-      # echoes the command before executing it.
-      #
-      # Therefore:
-      #
-      # IMAGE="$(make get-steamrt-image)"
-      #
-      # is WRONG.
-      #
-      # We extract the actual registry URL from the output.
       # ============================================================
 
       - name: Inspect generated configuration
@@ -408,16 +403,11 @@ jobs:
 
           test -f Makefile
 
-          echo "========================================"
-          echo "TARGET ARCH"
-          echo "========================================"
-
+          echo "TARGET ARCH:"
           grep -n -m 50 'TARGET_ARCH' Makefile || true
 
           echo
-          echo "========================================"
-          echo "STEAMRT IMAGE"
-          echo "========================================"
+          echo "STEAMRT IMAGE:"
 
           make \
             --no-print-directory \
@@ -433,56 +423,25 @@ jobs:
 
           if [ -z "$IMAGE" ]; then
             echo "::error::Failed to extract SteamRT image from make output."
-
-            echo
-            echo "Raw output:"
             cat steamrt-image.log
-
             exit 1
           fi
 
-          echo
-          echo "Resolved SteamRT:"
-          echo "$IMAGE"
-
-          echo
-          echo "Expected SteamRT:"
-          echo "$STEAMRT_IMAGE"
+          echo "Resolved: $IMAGE"
+          echo "Expected: $STEAMRT_IMAGE"
 
           if [ "$IMAGE" != "$STEAMRT_IMAGE" ]; then
-
-            echo "::error::Configured SteamRT image differs from expected Valve ARM64 SDK."
-
-            echo
-            echo "Expected:"
-            echo "$STEAMRT_IMAGE"
-
-            echo
-            echo "Actual:"
-            echo "$IMAGE"
-
-            echo
-            echo "Raw make output:"
+            echo "::error::Configured SteamRT image differs from expected."
+            echo "Expected: $STEAMRT_IMAGE"
+            echo "Actual:   $IMAGE"
             cat steamrt-image.log
-
             exit 1
           fi
 
-          echo
           echo "Valve ARM64 SteamRT confirmed."
 
           echo
-          echo "========================================"
-          echo "ARM64 SDK"
-          echo "========================================"
-
-          echo "$IMAGE" | grep 'arm64-llvm' || true
-
-          echo
-          echo "========================================"
-          echo "ARM64EC SOURCE"
-          echo "========================================"
-
+          echo "ARM64EC SOURCE:"
           grep -n -m 50 \
             'arm64ec-windows' \
             "$GITHUB_WORKSPACE/proton/Makefile.in" \
@@ -498,21 +457,10 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "TEST STEAMRT CONTAINER"
-          echo "========================================"
-
-          make \
-            --no-print-directory \
-            test-container
+          make --no-print-directory test-container
 
       # ============================================================
       # Print build configuration
-      #
-      # IMPORTANT:
-      #
-      # Again, parse the actual URL rather than assigning the
-      # complete make output.
       # ============================================================
 
       - name: Print build configuration
@@ -521,25 +469,12 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "BUILD CONFIGURATION"
-          echo "========================================"
-
-          echo
-          echo "Runner:"
-          uname -m
-
-          echo
-          echo "Proton ref:"
-          echo "$PROTON_REF"
-
-          echo
-          echo "Build name:"
-          echo "$BUILD_NAME"
+          echo "Runner:     $(uname -m)"
+          echo "Proton ref: $PROTON_REF"
+          echo "Build name: $BUILD_NAME"
 
           echo
           echo "SteamRT:"
-
           make \
             --no-print-directory \
             get-steamrt-image \
@@ -548,12 +483,8 @@ jobs:
             | tail -1
 
           echo
-          echo "Jobs:"
-          echo "${{ inputs.jobs || '8' }}"
-
-          echo
-          echo "Unstripped:"
-          echo "${{ inputs.unstripped }}"
+          echo "Jobs:       ${{ inputs.jobs || '8' }}"
+          echo "Unstripped: ${{ inputs.unstripped }}"
 
           echo
           echo "Target:"
@@ -561,7 +492,6 @@ jobs:
 
           echo
           echo "ccache:"
-
           ccache -s || true
 
       # ============================================================
@@ -581,47 +511,21 @@ jobs:
             exit 1
           fi
 
-          echo "========================================"
-          echo "BUILD START"
-          echo "========================================"
-
-          echo
-          echo "Parallel jobs:"
-          echo "$JOBS"
-
-          echo
-          echo "Unstripped:"
-          echo "${{ inputs.unstripped }}"
+          echo "Parallel jobs: $JOBS"
+          echo "Unstripped:    ${{ inputs.unstripped }}"
 
           if [ "${{ inputs.unstripped }}" = "true" ]; then
-
-            make \
-              -j"$JOBS" \
-              UNSTRIPPED_BUILD=1 \
-              2>&1 \
-              | tee build.log
-
+            make -j"$JOBS" UNSTRIPPED_BUILD=1 2>&1 | tee build.log
           else
-
-            make \
-              -j"$JOBS" \
-              2>&1 \
-              | tee build.log
-
+            make -j"$JOBS" 2>&1 | tee build.log
           fi
 
           status="${PIPESTATUS[0]}"
 
-          echo
           echo "make exit status: $status"
 
           if [ "$status" -ne 0 ]; then
-
-            echo
-            echo "========================================"
             echo "BUILD ERROR SUMMARY"
-            echo "========================================"
-
             grep \
               -nEi \
               '(^|[^A-Za-z])(error:|error [0-9]+|failed|fatal error:|no rule to make target)' \
@@ -630,10 +534,7 @@ jobs:
               || true
 
             echo
-            echo "========================================"
             echo "LAST 250 BUILD LINES"
-            echo "========================================"
-
             tail -250 build.log
 
             exit "$status"
@@ -647,10 +548,6 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "========================================"
-          echo "CCACHE STATISTICS"
-          echo "========================================"
-
           ccache -s || true
 
       # ============================================================
@@ -665,41 +562,18 @@ jobs:
 
           JOBS="${{ inputs.jobs || '8' }}"
 
-          echo "========================================"
-          echo "CREATE PROTON REDIST"
-          echo "========================================"
-
           if [ "${{ inputs.unstripped }}" = "true" ]; then
-
-            make \
-              -j"$JOBS" \
-              UNSTRIPPED_BUILD=1 \
-              redist \
-              2>&1 \
-              | tee redist.log
-
+            make -j"$JOBS" UNSTRIPPED_BUILD=1 redist 2>&1 | tee redist.log
           else
-
-            make \
-              -j"$JOBS" \
-              redist \
-              2>&1 \
-              | tee redist.log
-
+            make -j"$JOBS" redist 2>&1 | tee redist.log
           fi
 
           status="${PIPESTATUS[0]}"
 
-          echo
           echo "redist exit status: $status"
 
           if [ "$status" -ne 0 ]; then
-
-            echo
-            echo "========================================"
             echo "REDIST ERROR SUMMARY"
-            echo "========================================"
-
             grep \
               -nEi \
               '(^|[^A-Za-z])(error:|error [0-9]+|failed|fatal error:)' \
@@ -708,65 +582,74 @@ jobs:
               || true
 
             echo
-            echo "========================================"
             echo "LAST 250 REDIST LINES"
-            echo "========================================"
-
             tail -250 redist.log
 
             exit "$status"
           fi
 
-          echo
-          echo "========================================"
-          echo "REDIST BASIC CHECK"
-          echo "========================================"
-
           test -d redist
-
           test -f redist/compatibilitytool.vdf
-
           test -f redist/proton
 
           echo "Proton redist created successfully."
 
       # ============================================================
-      # Inspect redist
+      # Slim redist (Wine + FEX + DXVK/VKD3D) and strip
       # ============================================================
 
-      - name: Inspect Proton redist
+      - name: Slim redist and strip
+        if: ${{ inputs.unstripped != true }}
         working-directory: proton-build
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "REDIST FILES"
-          echo "========================================"
-
-          find redist \
-            -maxdepth 3 \
-            -type f \
-            | sort \
-            | awk 'NR<=300'
-
-          echo
-          echo "========================================"
-          echo "REDIST SIZE"
-          echo "========================================"
-
+          echo "SIZE BEFORE SLIM:"
           du -sh redist
 
           echo
-          echo "========================================"
-          echo "REDIST DIRECTORIES"
-          echo "========================================"
+          echo "Top 20 largest before slim:"
+          find redist -type f -printf '%s %p\n' \
+            | sort -rn \
+            | awk 'NR<=20 {printf "%8.2f MB  %s\n", $1/1024/1024, $2}'
 
-          find redist \
-            -maxdepth 2 \
-            -type d \
-            | sort \
-            | awk 'NR<=200'
+          find redist -type f -name '*.debug' -delete || true
+
+          rm -rf redist/files/lib*/gstreamer-1.0 || true
+          find redist/files/lib* -maxdepth 1 -name 'libgst*.so*' -delete || true
+
+          # 可选：删除 DXVK / VKD3D（默认保留）
+          # rm -rf redist/files/lib*/wine/dxvk || true
+          # rm -rf redist/files/lib*/wine/vkd3d || true
+
+          find redist -type f \( -name '*.a' -o -name '*.la' \) -delete || true
+
+          find redist -type d -name 'include' -prune -exec rm -rf {} + 2>/dev/null || true
+          find redist -type d -name 'pkgconfig' -prune -exec rm -rf {} + 2>/dev/null || true
+          find redist -type d -name 'cmake' -prune -exec rm -rf {} + 2>/dev/null || true
+
+          echo
+          echo "Stripping ELF / PE..."
+
+          find redist -type f \
+            \( -name '*.so' -o -name '*.so.*' \
+            -o -name '*.dll' -o -name '*.exe' \
+            -o -name '*.dll.so' \) \
+            -exec llvm-strip --strip-unneeded {} \; 2>/dev/null || true
+
+          find redist -type f -executable ! -name '*.*' \
+            -exec llvm-strip --strip-unneeded {} \; 2>/dev/null || true
+
+          echo
+          echo "SIZE AFTER SLIM:"
+          du -sh redist
+
+          echo
+          echo "Top 20 largest after slim:"
+          find redist -type f -printf '%s %p\n' \
+            | sort -rn \
+            | awk 'NR<=20 {printf "%8.2f MB  %s\n", $1/1024/1024, $2}'
 
       # ============================================================
       # Verify ARM64 ELF
@@ -778,10 +661,6 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "AARCH64 ELF CHECK"
-          echo "========================================"
-
           AARCH64_COUNT="$(
             find redist \
               -type f \
@@ -791,18 +670,15 @@ jobs:
               || true
           )"
 
-          echo
-          echo "AArch64 ELF count:"
-          echo "$AARCH64_COUNT"
+          echo "AArch64 ELF count: $AARCH64_COUNT"
 
           if [ "$AARCH64_COUNT" -eq 0 ]; then
-            echo "::error::No AArch64 ELF binaries were found in Proton redist."
+            echo "::error::No AArch64 ELF binaries found."
             exit 1
           fi
 
           echo
           echo "AArch64 examples:"
-
           find redist \
             -type f \
             -exec file {} \; \
@@ -820,10 +696,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "========================================"
-          echo "ARM64 / ARM64EC ARTIFACTS"
-          echo "========================================"
-
+          echo "ARM64 / ARM64EC ARTIFACTS:"
           find redist \
             -type f \
             | grep -Ei -m 250 \
@@ -831,9 +704,7 @@ jobs:
             || true
 
           echo
-          echo "========================================"
-          echo "FEX ARTIFACTS"
-          echo "========================================"
+          echo "FEX ARTIFACTS:"
 
           FEX_COUNT="$(
             find redist \
@@ -842,15 +713,14 @@ jobs:
               || true
           )"
 
-          echo "FEX-related files:"
-          echo "$FEX_COUNT"
+          echo "FEX-related files: $FEX_COUNT"
 
           if [ "$FEX_COUNT" -eq 0 ]; then
-            echo "::warning::No filename containing 'fex' was found in redist."
+            echo "::warning::No filename containing 'fex' was found."
           fi
 
       # ============================================================
-      # Generate Termux build information
+      # Generate Termux build info
       # ============================================================
 
       - name: Generate build info
@@ -859,94 +729,93 @@ jobs:
         run: |
           set -euxo pipefail
 
-          mkdir -p \
-            redist/termux
+          mkdir -p redist/termux
 
           PROTON_COMMIT="$(
-            git \
-              -C "$GITHUB_WORKSPACE/proton" \
-              rev-parse HEAD
+            git -C "$GITHUB_WORKSPACE/proton" rev-parse HEAD
           )"
 
           PROTON_VERSION="$(
             git \
               -C "$GITHUB_WORKSPACE/proton" \
-              describe \
-              --always \
-              --tags \
-              2>/dev/null \
+              describe --always --tags 2>/dev/null \
               || echo unknown
           )"
 
           STEAMRT="$(
-            make \
-              --no-print-directory \
-              get-steamrt-image \
-              | grep -E \
-                '^registry\.gitlab\.steamos\.cloud/' \
+            make --no-print-directory get-steamrt-image \
+              | grep -E '^registry\.gitlab\.steamos\.cloud/' \
               | tail -1
           )"
 
-          BUILD_TIME="$(
-            date -u \
-              '+%Y-%m-%d %H:%M:%S UTC'
-          )"
+          BUILD_TIME="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
-          printf '%s\n' \
-            'Valve Proton ARM64 / ARM64EC' \
-            '' \
-            'Source:' \
-            '  ValveSoftware/Proton' \
-            "  Ref: $PROTON_REF" \
-            "  Commit: $PROTON_COMMIT" \
-            "  Version: $PROTON_VERSION" \
-            '' \
-            'Build:' \
-            "  Name: $BUILD_NAME" \
-            "  Time: $BUILD_TIME" \
-            "  Runner: $(uname -m)" \
-            '' \
-            'Target:' \
-            '  Linux AArch64' \
-            '  Termux glibc' \
-            '' \
-            'Windows targets:' \
-            '  i386' \
-            '  x86_64' \
-            '  aarch64' \
-            '  ARM64EC' \
-            '' \
-            'SteamRT:' \
-            "  $STEAMRT" \
-            '' \
-            'Build mode:' \
-            "  Unstripped: ${{ inputs.unstripped }}" \
-            '' \
-            'Runtime:' \
-            '  Linux/glibc' \
-            '  NOT Android/Bionic' \
-            '  Termux glibc runtime required' \
-            '' \
-            'Example loader:' \
-            '  $PREFIX/glibc/lib/ld-linux-aarch64.so.1' \
-            '' \
-            'Note:' \
-            '  This workflow does not patch Proton runtime paths for Termux.' \
-            > redist/termux/README-TERMUX.txt
+          {
+            printf '%s\n' 'Valve Proton ARM64 / ARM64EC'
+            printf '%s\n' ''
+            printf '%s\n' 'Source:'
+            printf '%s\n' '  ValveSoftware/Proton'
+            printf '%s\n' "  Ref: $PROTON_REF"
+            printf '%s\n' "  Commit: $PROTON_COMMIT"
+            printf '%s\n' "  Version: $PROTON_VERSION"
+            printf '%s\n' ''
+            printf '%s\n' 'Build:'
+            printf '%s\n' "  Name: $BUILD_NAME"
+            printf '%s\n' "  Time: $BUILD_TIME"
+            printf '%s\n' "  Runner: $(uname -m)"
+            printf '%s\n' ''
+            printf '%s\n' 'Target:'
+            printf '%s\n' '  Linux AArch64'
+            printf '%s\n' '  Termux glibc'
+            printf '%s\n' ''
+            printf '%s\n' 'Termux patches:'
+            printf '%s\n' '  Wine source /tmp -> /data/data/com.termux/files/usr/tmp'
+            printf '%s\n' '  Applied to: subprojects/wine/**/*.{c,h,in,spec}'
+            printf '%s\n' '  Special handling: server/, file.c, loader.c, server.c'
+            printf '%s\n' ''
+            printf '%s\n' 'Package layout:'
+            printf '%s\n' '  bin/     wine 可执行'
+            printf '%s\n' '  lib/     Wine 运行库 + wine/ 子目录'
+            printf '%s\n' '  lib64/   64 位库'
+            printf '%s\n' '  share/   Wine 数据（nls/fonts）'
+            printf '%s\n' '  libexec/ FEX 等辅助程序'
+            printf '%s\n' '  proton   Termux glibc 启动脚本'
+            printf '%s\n' ''
+            printf '%s\n' 'Windows targets:'
+            printf '%s\n' '  i386'
+            printf '%s\n' '  x86_64'
+            printf '%s\n' '  aarch64'
+            printf '%s\n' '  ARM64EC'
+            printf '%s\n' ''
+            printf '%s\n' 'SteamRT:'
+            printf '%s\n' "  $STEAMRT"
+            printf '%s\n' ''
+            printf '%s\n' 'Build mode:'
+            printf '%s\n' "  Unstripped: ${{ inputs.unstripped }}"
+            printf '%s\n' ''
+            printf '%s\n' 'Slimming:'
+            printf '%s\n' '  GStreamer: removed'
+            printf '%s\n' '  Debug symbols (.debug): removed'
+            printf '%s\n' '  Static libs (.a/.la): removed'
+            printf '%s\n' '  Headers/pkgconfig/cmake: removed'
+            printf '%s\n' '  Binaries: stripped with llvm-strip'
+            printf '%s\n' ''
+            printf '%s\n' 'Runtime:'
+            printf '%s\n' '  Linux/glibc'
+            printf '%s\n' '  NOT Android/Bionic'
+            printf '%s\n' '  Termux glibc runtime required'
+            printf '%s\n' ''
+            printf '%s\n' 'Example loader:'
+            printf '%s\n' '  $PREFIX/glibc/lib/ld-linux-aarch64.so.1'
+          } > redist/termux/README-TERMUX.txt
 
-          echo
-          echo "========================================"
-          echo "TERMUX README"
-          echo "========================================"
-
-          cat \
-            redist/termux/README-TERMUX.txt
+          cat redist/termux/README-TERMUX.txt
 
       # ============================================================
-      # Package Termux Proton
+      # Package Termux Proton (FLATTENED - no files/)
       # ============================================================
 
-      - name: Package Termux Proton
+      - name: Package Termux Proton (flattened)
         working-directory: proton-build
         shell: bash
         run: |
@@ -955,68 +824,141 @@ jobs:
           VERSION="$(
             git \
               -C "$GITHUB_WORKSPACE/proton" \
-              describe \
-              --always \
-              --tags \
-              2>/dev/null \
+              describe --always --tags 2>/dev/null \
               || echo unknown
           )"
 
           SHORT_VERSION="${VERSION#proton-}"
-
           PACKAGE_NAME="${BUILD_NAME}-${SHORT_VERSION}"
-
           PACKAGE_DIR="$PWD/$PACKAGE_NAME"
 
-          echo "========================================"
-          echo "PACKAGE"
-          echo "========================================"
+          echo "Version: $VERSION"
+          echo "Package: $PACKAGE_NAME"
 
-          echo
-          echo "Version:"
-          echo "$VERSION"
+          rm -rf "$PACKAGE_DIR"
+          rm -f  "$PACKAGE_NAME.tar.xz" "$PACKAGE_NAME.tar.xz.sha256"
 
-          echo
-          echo "Package:"
-          echo "$PACKAGE_NAME"
+          mkdir -p "$PACKAGE_DIR"
 
-          echo
-          echo "Directory:"
-          echo "$PACKAGE_DIR"
+          # 展平 files/*
+          for d in bin lib lib64 share libexec include; do
+            if [ -d "redist/files/$d" ]; then
+              cp -a "redist/files/$d" "$PACKAGE_DIR/$d"
+              echo "copied: $d"
+            fi
+          done
 
-          rm -rf \
-            "$PACKAGE_DIR"
+          # 改写 redist/proton -> 顶层 proton
+          if [ ! -f redist/proton ]; then
+            echo "::error::redist/proton not found."
+            exit 1
+          fi
 
-          rm -f \
-            "$PACKAGE_NAME.tar.xz" \
-            "$PACKAGE_NAME.tar.xz.sha256"
+          cp redist/proton "$PACKAGE_DIR/proton"
 
-          mkdir -p \
+          sed -i \
+            -e 's|\$HERE/files|\$HERE|g' \
+            -e 's|\${HERE}/files|\${HERE}|g' \
+            -e 's|"\$STEAM_COMPAT_TOOL_PATH/files|"$STEAM_COMPAT_TOOL_PATH|g' \
+            -e 's|/files/bin|/bin|g' \
+            -e 's|/files/lib|/lib|g' \
+            -e 's|/files/lib64|/lib64|g' \
+            -e 's|/files/share|/share|g' \
+            -e 's|/files/libexec|/libexec|g' \
             "$PACKAGE_DIR/proton"
 
-          cp -a \
-            redist/. \
-            "$PACKAGE_DIR/proton/"
+          # 改 shebang 为 Termux bash
+          sed -i \
+            '1s|^#!.*bash.*|#!/data/data/com.termux/files/usr/bin/bash|' \
+            "$PACKAGE_DIR/proton"
 
-          cp \
-            redist/termux/README-TERMUX.txt \
-            "$PACKAGE_DIR/README-TERMUX.txt"
+          chmod +x "$PACKAGE_DIR/proton"
 
-          printf '%s\n' \
-            'Valve Proton ARM64 / ARM64EC' \
-            "Build: $BUILD_NAME" \
-            "Version: $VERSION" \
-            "Target: Linux AArch64 / Termux glibc" \
-            "Commit: $(git -C "$GITHUB_WORKSPACE/proton" rev-parse HEAD)" \
-            > "$PACKAGE_DIR/BUILD-INFO.txt"
+          echo
+          echo "Remaining 'files/' references in proton script:"
+          grep -n 'files/' "$PACKAGE_DIR/proton" || echo "  (none)"
+
+          echo
+          echo "proton shebang:"
+          head -1 "$PACKAGE_DIR/proton"
+
+          # 丢弃 Steam 专用元数据
+          rm -f "$PACKAGE_DIR/compatibilitytool.vdf" || true
+          rm -f "$PACKAGE_DIR/toolmanifest.vdf"     || true
+          rm -f "$PACKAGE_DIR/version"              || true
+
+          # ------------------------------------------------------------
+          # Termux glibc wrapper（printf 逐行写，避免 heredoc 缩进问题）
+          # ------------------------------------------------------------
+          WRAPPER="$PACKAGE_DIR/proton-termux"
+
+          {
+            printf '%s\n' '#!/data/data/com.termux/files/usr/bin/bash'
+            printf '%s\n' 'set -e'
+            printf '%s\n' ''
+            printf '%s\n' 'SELF="$0"'
+            printf '%s\n' 'while [ -h "$SELF" ]; do'
+            printf '%s\n' '  DIR="$(cd -P "$(dirname "$SELF")" && pwd)"'
+            printf '%s\n' '  SELF="$(readlink "$SELF")"'
+            printf '%s\n' '  case "$SELF" in'
+            printf '%s\n' '    /*) ;;'
+            printf '%s\n' '    *) SELF="$DIR/$SELF" ;;'
+            printf '%s\n' '  esac'
+            printf '%s\n' 'done'
+            printf '%s\n' ''
+            printf '%s\n' 'PROTON_HOME="${PROTON_HOME:-$(cd -P "$(dirname "$SELF")" && pwd)}"'
+            printf '%s\n' ''
+            printf '%s\n' 'TERMUX_GLIBC="${TERMUX_GLIBC:-${PREFIX:-/data/data/com.termux/files/usr}/glibc}"'
+            printf '%s\n' 'LOADER="$TERMUX_GLIBC/lib/ld-linux-aarch64.so.1"'
+            printf '%s\n' ''
+            printf '%s\n' 'if [ ! -x "$LOADER" ]; then'
+            printf '%s\n' '  echo "error: Termux glibc loader not found: $LOADER" >&2'
+            printf '%s\n' '  echo "hint:  install glibc runtime, or set TERMUX_GLIBC" >&2'
+            printf '%s\n' '  exit 1'
+            printf '%s\n' 'fi'
+            printf '%s\n' ''
+            printf '%s\n' 'export PROTON_HOME'
+            printf '%s\n' 'export WINEDLLPATH="$PROTON_HOME/lib/wine:$PROTON_HOME/lib64/wine"'
+            printf '%s\n' 'export LD_LIBRARY_PATH="$PROTON_HOME/lib:$PROTON_HOME/lib64:${LD_LIBRARY_PATH:-}"'
+            printf '%s\n' 'export WINEPREFIX="${WINEPREFIX:-$HOME/.wine-proton}"'
+            printf '%s\n' ''
+            printf '%s\n' 'TERMUX_BASH="${TERMUX_BASH:-/data/data/com.termux/files/usr/bin/bash}"'
+            printf '%s\n' ''
+            printf '%s\n' 'exec "$TERMUX_BASH" "$PROTON_HOME/proton" "$@"'
+          } > "$WRAPPER"
+
+          chmod +x "$WRAPPER"
+
+          cp redist/termux/README-TERMUX.txt "$PACKAGE_DIR/README-TERMUX.txt"
+
+          {
+            printf '%s\n' 'Valve Proton ARM64 / ARM64EC'
+            printf '%s\n' "Build:   $BUILD_NAME"
+            printf '%s\n' "Version: $VERSION"
+            printf '%s\n' 'Target:  Linux AArch64 / Termux glibc'
+            printf '%s\n' "Commit:  $(git -C "$GITHUB_WORKSPACE/proton" rev-parse HEAD)"
+            printf '%s\n' ''
+            printf '%s\n' 'Termux patches:'
+            printf '%s\n' '  Wine /tmp -> /data/data/com.termux/files/usr/tmp'
+            printf '%s\n' ''
+            printf '%s\n' 'Layout (flattened, no files/):'
+            printf '%s\n' '  bin/       wine 可执行'
+            printf '%s\n' '  lib/       Wine 运行库 + wine/ 子目录'
+            printf '%s\n' '  lib64/     64 位库'
+            printf '%s\n' '  share/     Wine 数据（nls/fonts）'
+            printf '%s\n' '  libexec/   FEX 等辅助程序'
+            printf '%s\n' '  proton     官方 Proton 启动脚本（路径已改写）'
+            printf '%s\n' '  proton-termux  Termux glibc 直接启动 wrapper'
+          } > "$PACKAGE_DIR/BUILD-INFO.txt"
 
           echo
           echo "Creating tar.xz..."
 
-          tar \
-            -cJf \
-            "$PACKAGE_NAME.tar.xz" \
-            "$PACKAGE_NAME"
+          XZ_OPT='-9e -T0' \
+            tar \
+              -cJf \
+              "$PACKAGE_NAME.tar.xz" \
+              "$PACKAGE_NAME"
 
           echo
           echo "Creating SHA256..."
@@ -1026,19 +968,16 @@ jobs:
             > "$PACKAGE_NAME.tar.xz.sha256"
 
           echo
-          echo "========================================"
-          echo "PACKAGE RESULT"
-          echo "========================================"
-
-          ls -lh \
-            "$PACKAGE_NAME.tar.xz" \
-            "$PACKAGE_NAME.tar.xz.sha256"
+          echo "PACKAGE RESULT:"
+          ls -lh "$PACKAGE_NAME.tar.xz" "$PACKAGE_NAME.tar.xz.sha256"
 
           echo
           echo "SHA256:"
+          cat "$PACKAGE_NAME.tar.xz.sha256"
 
-          cat \
-            "$PACKAGE_NAME.tar.xz.sha256"
+          echo
+          echo "PACKAGE TREE (top level):"
+          ls -la "$PACKAGE_DIR"
 
       # ============================================================
       # Verify final package
@@ -1049,10 +988,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          echo "========================================"
-          echo "FINAL PACKAGE CHECK"
-          echo "========================================"
 
           PACKAGE_FILE="$(
             find . \
@@ -1068,48 +1003,18 @@ jobs:
           fi
 
           SHA_FILE="${PACKAGE_FILE}.sha256"
-
           test -f "$SHA_FILE"
 
-          echo
-          echo "Package:"
-          echo "$PACKAGE_FILE"
-
-          echo
-          echo "Checksum:"
-          cat "$SHA_FILE"
+          echo "Package:  $PACKAGE_FILE"
+          echo "Checksum: $(cat "$SHA_FILE")"
 
           echo
           echo "Verifying checksum:"
-
-          sha256sum \
-            -c "$SHA_FILE"
+          sha256sum -c "$SHA_FILE"
 
           echo
           echo "Listing archive:"
-
-          tar \
-            -tJf \
-            "$PACKAGE_FILE" \
-            | awk 'NR<=100'
-
-      # ============================================================
-      # Upload Proton redist
-      # ============================================================
-
-      - name: Upload Proton redist
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BUILD_NAME }}-redist-arm64ec
-
-          path: |
-            proton-build/redist/**
-            proton-build/build.log
-            proton-build/redist.log
-
-          if-no-files-found: error
-
-          retention-days: 14
+          tar -tJf "$PACKAGE_FILE" | awk 'NR<=120'
 
       # ============================================================
       # Upload Termux package
