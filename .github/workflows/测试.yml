@@ -31,7 +31,6 @@ on:
   schedule:
     - cron: '0 0 1,15 * *'
 
-
 env:
   # ============================================================
   # Valve Proton
@@ -43,20 +42,17 @@ env:
 
   BUILD_NAME: ${{ inputs.build_name || 'proton-arm64ec-termux' }}
 
-
   # ============================================================
   # ccache
   # ============================================================
 
   CCACHE_DIR: ${{ github.workspace }}/.ccache
 
-
   # ============================================================
   # Valve ARM64 SteamRT SDK
   # ============================================================
 
   STEAMRT_IMAGE: registry.gitlab.steamos.cloud/proton/steamrt4/sdk/arm64-llvm:4.0.20260331.220802-2
-
 
 jobs:
 
@@ -71,7 +67,6 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     timeout-minutes: 240
-
 
     steps:
 
@@ -110,14 +105,12 @@ jobs:
           echo "Disk:"
           df -h
 
-
       # ============================================================
       # Checkout workflow repository
       # ============================================================
 
       - name: Checkout
         uses: actions/checkout@v4
-
 
       # ============================================================
       # Verify ARM64 runner
@@ -139,7 +132,6 @@ jobs:
           echo
           echo "ARM64 runner confirmed:"
           echo "$ARCH"
-
 
       # ============================================================
       # Install host dependencies
@@ -178,7 +170,6 @@ jobs:
 
           sudo apt-get clean
 
-
       # ============================================================
       # Verify Docker
       # ============================================================
@@ -207,7 +198,6 @@ jobs:
           docker version \
             --format '{{.Server.Arch}}'
 
-
       # ============================================================
       # Restore ccache
       # ============================================================
@@ -222,7 +212,6 @@ jobs:
           restore-keys: |
             proton-arm64-${{ runner.arch }}-
             proton-arm64-
-
 
       # ============================================================
       # Configure ccache
@@ -255,7 +244,6 @@ jobs:
           echo
           echo "CCACHE_DIR:"
           echo "$CCACHE_DIR"
-
 
       # ============================================================
       # Clone Valve Proton
@@ -317,7 +305,6 @@ jobs:
           echo "Ref:"
           echo "$PROTON_REF"
 
-
       # ============================================================
       # Verify Valve ARM64 source
       # ============================================================
@@ -335,61 +322,42 @@ jobs:
 
           echo
           echo "TARGET_ARCH:"
-          grep -n \
-            'TARGET_ARCH' \
-            Makefile.in \
-            | head -50
+          grep -n -m 50 'TARGET_ARCH' Makefile.in || true
 
           echo
           echo "========================================"
           echo "AARCH64 UNIX"
           echo "========================================"
 
-          grep -n \
-            'aarch64-unix' \
-            Makefile.in \
-            | head -30
+          grep -n -m 30 'aarch64-unix' Makefile.in || true
 
           echo
           echo "========================================"
           echo "AARCH64 WINDOWS"
           echo "========================================"
 
-          grep -n \
-            'aarch64-windows' \
-            Makefile.in \
-            | head -30
+          grep -n -m 30 'aarch64-windows' Makefile.in || true
 
           echo
           echo "========================================"
           echo "ARM64EC WINDOWS"
           echo "========================================"
 
-          grep -n \
-            'arm64ec-windows' \
-            Makefile.in \
-            | head -50
+          grep -n -m 50 'arm64ec-windows' Makefile.in || true
 
           echo
           echo "========================================"
           echo "FEX AARCH64"
           echo "========================================"
 
-          grep -n \
-            'FEX_aarch64' \
-            Makefile.in \
-            | head -30
+          grep -n -m 30 'FEX_aarch64' Makefile.in || true
 
           echo
           echo "========================================"
           echo "FEX ARM64EC"
           echo "========================================"
 
-          grep -n \
-            'FEX_arm64ec' \
-            Makefile.in \
-            | head -30
-
+          grep -n -m 30 'FEX_arm64ec' Makefile.in || true
 
       # ============================================================
       # Configure Proton ARM64
@@ -414,7 +382,6 @@ jobs:
             --target-arch=arm64 \
             --enable-ccache \
             --build-name="$BUILD_NAME"
-
 
       # ============================================================
       # Inspect generated configuration
@@ -445,10 +412,7 @@ jobs:
           echo "TARGET ARCH"
           echo "========================================"
 
-          grep -n \
-            'TARGET_ARCH' \
-            Makefile \
-            | head -50
+          grep -n -m 50 'TARGET_ARCH' Makefile || true
 
           echo
           echo "========================================"
@@ -512,19 +476,17 @@ jobs:
           echo "ARM64 SDK"
           echo "========================================"
 
-          echo "$IMAGE" | grep \
-            'arm64-llvm'
+          echo "$IMAGE" | grep 'arm64-llvm' || true
 
           echo
           echo "========================================"
           echo "ARM64EC SOURCE"
           echo "========================================"
 
-          grep -n \
+          grep -n -m 50 \
             'arm64ec-windows' \
             "$GITHUB_WORKSPACE/proton/Makefile.in" \
-            | head -50
-
+            || true
 
       # ============================================================
       # Test SteamRT container
@@ -543,7 +505,6 @@ jobs:
           make \
             --no-print-directory \
             test-container
-
 
       # ============================================================
       # Print build configuration
@@ -596,17 +557,12 @@ jobs:
 
           echo
           echo "Target:"
-          grep \
-            -n \
-            'TARGET_ARCH' \
-            Makefile \
-            | head -10
+          grep -n -m 10 'TARGET_ARCH' Makefile || true
 
           echo
           echo "ccache:"
 
           ccache -s || true
-
 
       # ============================================================
       # Build Proton
@@ -683,7 +639,6 @@ jobs:
             exit "$status"
           fi
 
-
       # ============================================================
       # ccache statistics
       # ============================================================
@@ -697,7 +652,6 @@ jobs:
           echo "========================================"
 
           ccache -s || true
-
 
       # ============================================================
       # Create Proton redist
@@ -776,7 +730,6 @@ jobs:
 
           echo "Proton redist created successfully."
 
-
       # ============================================================
       # Inspect redist
       # ============================================================
@@ -795,7 +748,7 @@ jobs:
             -maxdepth 3 \
             -type f \
             | sort \
-            | head -300
+            | awk 'NR<=300'
 
           echo
           echo "========================================"
@@ -813,8 +766,7 @@ jobs:
             -maxdepth 2 \
             -type d \
             | sort \
-            | head -200
-
+            | awk 'NR<=200'
 
       # ============================================================
       # Verify ARM64 ELF
@@ -854,10 +806,9 @@ jobs:
           find redist \
             -type f \
             -exec file {} \; \
-            | grep -E \
+            | grep -E -m 100 \
               'ELF.*aarch64|ELF.*ARM aarch64' \
-            | head -100
-
+            || true
 
       # ============================================================
       # Verify ARM64EC / FEX artifacts
@@ -875,9 +826,8 @@ jobs:
 
           find redist \
             -type f \
-            | grep -Ei \
+            | grep -Ei -m 250 \
               'arm64|aarch64|arm64ec|fex' \
-            | head -250 \
             || true
 
           echo
@@ -898,7 +848,6 @@ jobs:
           if [ "$FEX_COUNT" -eq 0 ]; then
             echo "::warning::No filename containing 'fex' was found in redist."
           fi
-
 
       # ============================================================
       # Generate Termux build information
@@ -992,7 +941,6 @@ jobs:
 
           cat \
             redist/termux/README-TERMUX.txt
-
 
       # ============================================================
       # Package Termux Proton
@@ -1092,7 +1040,6 @@ jobs:
           cat \
             "$PACKAGE_NAME.tar.xz.sha256"
 
-
       # ============================================================
       # Verify final package
       # ============================================================
@@ -1112,7 +1059,7 @@ jobs:
               -maxdepth 1 \
               -type f \
               -name '*.tar.xz' \
-              | head -1
+              | awk 'NR==1'
           )"
 
           if [ -z "$PACKAGE_FILE" ]; then
@@ -1144,8 +1091,7 @@ jobs:
           tar \
             -tJf \
             "$PACKAGE_FILE" \
-            | head -100
-
+            | awk 'NR<=100'
 
       # ============================================================
       # Upload Proton redist
@@ -1165,7 +1111,6 @@ jobs:
 
           retention-days: 14
 
-
       # ============================================================
       # Upload Termux package
       # ============================================================
@@ -1182,7 +1127,6 @@ jobs:
           if-no-files-found: error
 
           retention-days: 30
-
 
       # ============================================================
       # Upload failure logs
