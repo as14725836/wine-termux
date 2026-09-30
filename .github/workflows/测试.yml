@@ -1,0 +1,651 @@
+name: Valve Proton ARM64EC - Termux glibc
+
+on:
+  workflow_dispatch:
+    inputs:
+      proton_ref:
+        description: "Valve Proton branch/tag/commit"
+        required: true
+        default: "proton_11.0"
+
+      build_name:
+        description: "Output Proton name"
+        required: true
+        default: "Proton-ARM64EC-Termux"
+
+      unstripped:
+        description: "Keep debug symbols"
+        required: true
+        type: boolean
+        default: false
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+env:
+  PROTON_REPO: https://github.com/ValveSoftware/Proton.git
+  PROTON_REF: ${{ github.event.inputs.proton_ref || 'proton_11.0' }}
+  BUILD_NAME: ${{ github.event.inputs.build_name || 'Proton-ARM64EC-Termux' }}
+
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+
+  build:
+
+    # Proton ARM64 build requires an ARM64 build host.
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+
+      # ==========================================================
+      # Checkout workflow repository
+      # ==========================================================
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ==========================================================
+      # Host dependencies
+      #
+      # Proton does most compilation inside its SteamRT SDK
+      # container. Host side mainly needs Git, Docker/Podman,
+      # ccache, Python, build tools, etc.
+      # ==========================================================
+
+      - name: Install host dependencies
+        run: |
+          set -eux
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            git \
+            curl \
+            wget \
+            ca-certificates \
+            python3 \
+            python3-pip \
+            python3-venv \
+            rsync \
+            file \
+            jq \
+            xz-utils \
+            zip \
+            unzip \
+            gettext \
+            autoconf \
+            automake \
+            bison \
+            flex \
+            gperf \
+            cmake \
+            ninja-build \
+            meson \
+            pkg-config \
+            docker.io
+
+
+      # ==========================================================
+      # Docker
+      # ==========================================================
+
+      - name: Start Docker
+        run: |
+          set -eux
+
+          sudo systemctl enable --now docker
+
+          docker version
+
+          docker info
+
+
+      # ==========================================================
+      # ccache
+      # ==========================================================
+
+      - name: Configure ccache
+        run: |
+          set -eux
+
+          mkdir -p "$CCACHE_DIR"
+
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+
+          ccache --zero-stats
+
+
+      # ==========================================================
+      # Restore ccache
+      # ==========================================================
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: proton-arm64ec-${{ env.PROTON_REF }}-${{ github.sha }}
+
+          restore-keys: |
+            proton-arm64ec-${{ env.PROTON_REF }}-
+            proton-arm64ec-
+
+
+      # ==========================================================
+      # Clone Valve Proton
+      # ==========================================================
+
+      - name: Clone Valve Proton
+        run: |
+          set -eux
+
+          rm -rf proton
+
+          git clone \
+            --recurse-submodules \
+            "$PROTON_REPO" \
+            proton
+
+          cd proton
+
+          git fetch \
+            --depth=1 \
+            origin \
+            "$PROTON_REF"
+
+          git checkout "$PROTON_REF"
+
+          git submodule update --init --recursive
+
+          echo
+          echo "========================================"
+          echo "Proton revision"
+          echo "========================================"
+
+          git rev-parse HEAD
+
+          echo
+          echo "========================================"
+          echo "Submodules"
+          echo "========================================"
+
+          git submodule status
+
+
+      # ==========================================================
+      # Verify ARM64 host
+      # ==========================================================
+
+      - name: Verify ARM64 host
+        run: |
+          set -eux
+
+          echo "uname:"
+          uname -a
+
+          echo
+          echo "machine:"
+          uname -m
+
+          echo
+          echo "architecture:"
+          dpkg --print-architecture
+
+          echo
+          echo "CPU:"
+          lscpu
+
+
+      # ==========================================================
+      # Verify Valve ARM64EC support
+      # ==========================================================
+
+      - name: Verify Proton ARM64EC support
+        working-directory: proton
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "TARGET_ARCH"
+          echo "========================================"
+
+          grep -n \
+            -E \
+            'TARGET_ARCH|arm64|aarch64' \
+            Makefile.in \
+            | head -100
+
+
+          echo
+          echo "========================================"
+          echo "ARM64EC"
+          echo "========================================"
+
+          grep -R \
+            -n \
+            -E \
+            'arm64ec|ARM64EC' \
+            Makefile.in \
+            wine \
+            FEX \
+            vkd3d-proton \
+            dxvk \
+            2>/dev/null \
+            | head -300 \
+            || true
+
+
+      # ==========================================================
+      # Test Proton SDK container
+      # ==========================================================
+
+      - name: Test Proton SDK container
+        working-directory: proton
+        run: |
+          set -eux
+
+          make \
+            build_name="$BUILD_NAME" \
+            --no-print-directory \
+            test-container
+
+
+      # ==========================================================
+      # Configure Proton ARM64
+      #
+      # IMPORTANT:
+      #
+      # We intentionally use Valve's configure.sh.
+      #
+      # Do NOT manually configure Wine here.
+      # ==========================================================
+
+      - name: Configure Proton ARM64
+        working-directory: proton
+        run: |
+          set -eux
+
+          rm -rf "build/build-${BUILD_NAME}"
+
+          make \
+            build_name="$BUILD_NAME" \
+            enable_ccache=1 \
+            configure
+
+
+      # ==========================================================
+      # Show generated configuration
+      # ==========================================================
+
+      - name: Inspect generated configuration
+        working-directory: proton
+        run: |
+          set -eux
+
+          BUILD_DIR="build/build-${BUILD_NAME}"
+
+          test -f "$BUILD_DIR/Makefile"
+
+          echo "Build directory:"
+          echo "$BUILD_DIR"
+
+          echo
+          echo "Target architecture:"
+
+          grep -n \
+            -E \
+            'TARGET_ARCH|STEAMRT_IMAGE' \
+            "$BUILD_DIR/Makefile" \
+            | head -50
+
+
+          echo
+          echo "Windows architectures:"
+
+          grep -n \
+            -E \
+            'ARCHS|windows_ARCHS|unix_ARCHS' \
+            "$BUILD_DIR/Makefile" \
+            | head -80
+
+
+      # ==========================================================
+      # Build Proton
+      #
+      # This invokes Valve's own SteamRT ARM64 container.
+      #
+      # It builds:
+      #
+      #   aarch64-unix
+      #   aarch64-windows
+      #   arm64ec-windows
+      #   x86_64-windows
+      #   i386-windows
+      #
+      # plus FEX / DXVK / VKD3D-Proton and other dependencies.
+      # ==========================================================
+
+      - name: Build Proton ARM64EC
+        working-directory: proton
+        run: |
+          set -o pipefail
+
+          if [ "${{ github.event.inputs.unstripped }}" = "true" ]; then
+            make \
+              build_name="$BUILD_NAME" \
+              enable_ccache=1 \
+              UNSTRIPPED_BUILD=1 \
+              proton \
+              2>&1 | tee ../proton-build.log
+          else
+            make \
+              build_name="$BUILD_NAME" \
+              enable_ccache=1 \
+              proton \
+              2>&1 | tee ../proton-build.log
+          fi
+
+
+      # ==========================================================
+      # Build redist package
+      # ==========================================================
+
+      - name: Build Proton redist
+        working-directory: proton
+        run: |
+          set -o pipefail
+
+          make \
+            build_name="$BUILD_NAME" \
+            enable_ccache=1 \
+            redist \
+            2>&1 | tee ../proton-redist.log
+
+
+      # ==========================================================
+      # Inspect output
+      # ==========================================================
+
+      - name: Inspect Proton output
+        working-directory: proton
+        run: |
+          set -eux
+
+          echo "========================================"
+          echo "Build directory"
+          echo "========================================"
+
+          find "build/build-${BUILD_NAME}" \
+            -maxdepth 3 \
+            -type f \
+            | head -200
+
+
+          echo
+          echo "========================================"
+          echo "Redist"
+          echo "========================================"
+
+          find "build/${BUILD_NAME}" \
+            -maxdepth 4 \
+            -type f \
+            | head -300
+
+
+          echo
+          echo "========================================"
+          echo "Size"
+          echo "========================================"
+
+          du -sh \
+            "build/build-${BUILD_NAME}" \
+            "build/${BUILD_NAME}" \
+            2>/dev/null \
+            || true
+
+
+      # ==========================================================
+      # Verify important ARM64EC files
+      # ==========================================================
+
+      - name: Verify ARM64EC artifacts
+        working-directory: proton
+        run: |
+          set -eux
+
+          BUILD_DIR="build/build-${BUILD_NAME}"
+
+          echo "Searching for ARM64EC binaries..."
+
+          find "$BUILD_DIR" \
+            -type f \
+            \( \
+              -name '*.dll' \
+              -o -name '*.exe' \
+              -o -name '*.so' \
+            \) \
+            -print \
+            | while read -r f; do
+
+                if file "$f" | grep -qi \
+                  'ARM64\|aarch64'; then
+
+                  echo
+                  echo "ARM64:"
+                  file "$f"
+
+                fi
+
+              done \
+            | head -200 \
+            || true
+
+
+      # ==========================================================
+      # Search FEX ARM64EC
+      # ==========================================================
+
+      - name: Verify FEX ARM64EC
+        working-directory: proton
+        run: |
+          set -eux
+
+          BUILD_DIR="build/build-${BUILD_NAME}"
+
+          echo "FEX artifacts:"
+
+          find "$BUILD_DIR" \
+            -iname '*fex*' \
+            -o -iname '*arm64ec*' \
+            | head -300 \
+            || true
+
+
+      # ==========================================================
+      # Save build information
+      # ==========================================================
+
+      - name: Generate build information
+        working-directory: proton
+        run: |
+          set -eux
+
+          BUILD_DIR="build/build-${BUILD_NAME}"
+
+          mkdir -p \
+            "$BUILD_DIR/build-info"
+
+          {
+            echo "Proton repository:"
+            echo "$PROTON_REPO"
+
+            echo
+
+            echo "Proton ref:"
+            echo "$PROTON_REF"
+
+            echo
+
+            echo "Proton commit:"
+            git rev-parse HEAD
+
+            echo
+
+            echo "Build name:"
+            echo "$BUILD_NAME"
+
+            echo
+
+            echo "Host:"
+            uname -a
+
+            echo
+
+            echo "Architecture:"
+            uname -m
+
+            echo
+
+            echo "ARM64EC support:"
+            grep -R \
+              -n \
+              -m 20 \
+              -E \
+              'arm64ec|ARM64EC' \
+              Makefile.in \
+              || true
+
+          } > \
+            "$BUILD_DIR/build-info/build-info.txt"
+
+
+      # ==========================================================
+      # Extract redist
+      # ==========================================================
+
+      - name: Locate redist
+        working-directory: proton
+        run: |
+          set -eux
+
+          find build \
+            -maxdepth 3 \
+            -type d \
+            -name redist \
+            -print
+
+
+      # ==========================================================
+      # Package for Termux glibc
+      # ==========================================================
+
+      - name: Create Termux package
+        working-directory: proton
+        run: |
+          set -eux
+
+          REDIST="build/${BUILD_NAME}"
+
+          test -d "$REDIST"
+
+          mkdir -p ../termux-proton
+
+          cp -a \
+            "$REDIST/." \
+            ../termux-proton/
+
+          mkdir -p \
+            ../termux-proton/termux
+
+          cat > \
+            ../termux-proton/termux/README-TERMUX.txt \
+            <<'EOF'
+          Valve Proton ARM64EC build
+
+          Target:
+            Linux AArch64 / Termux glibc
+
+          Windows PE architectures:
+            i386
+            x86_64
+            aarch64
+            ARM64EC
+
+          IMPORTANT:
+            This package is built from ValveSoftware/Proton.
+            It is not a normal desktop x86_64 Proton build.
+
+          For Termux glibc:
+            Do not use the Android bionic Wine binary.
+            Run the AArch64 Unix Wine binary through the
+            Termux glibc loader.
+
+          Example:
+
+            $PREFIX/glibc/lib/ld-linux-aarch64.so.1 \
+              path/to/proton/files/bin-arm64/wine
+
+          Adjust the exact Wine path according to the
+          contents of this build.
+          EOF
+
+
+      # ==========================================================
+      # Compress
+      # ==========================================================
+
+      - name: Compress Termux package
+        run: |
+          set -eux
+
+          tar \
+            -cJf \
+            "${BUILD_NAME}-termux-glibc-arm64ec.tar.xz" \
+            termux-proton
+
+
+      # ==========================================================
+      # Upload build logs
+      # ==========================================================
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proton-arm64ec-build-logs
+          path: |
+            proton-build.log
+            proton-redist.log
+            proton/build/build-${{ env.BUILD_NAME }}/build-info/
+
+
+      # ==========================================================
+      # Upload Proton artifact
+      # ==========================================================
+
+      - name: Upload Proton package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}-arm64ec
+          path: |
+            ${{ env.BUILD_NAME }}-termux-glibc-arm64ec.tar.xz
+          retention-days: 30
+
+
+      # ==========================================================
+      # ccache statistics
+      # ==========================================================
+
+      - name: ccache statistics
+        if: always()
+        run: |
+          ccache --show-stats
