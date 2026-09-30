@@ -28,39 +28,36 @@ permissions:
 
 env:
   PROTON_REPO: https://github.com/ValveSoftware/Proton.git
-  PROTON_REF: ${{ github.event.inputs.proton_ref || 'proton_11.0' }}
-  BUILD_NAME: ${{ github.event.inputs.build_name || 'Proton-ARM64EC-Termux' }}
-
+  PROTON_REF: ${{ inputs.proton_ref || 'proton_11.0' }}
+  BUILD_NAME: ${{ inputs.build_name || 'Proton-ARM64EC-Termux' }}
   CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
-
   build:
-
-    # Proton ARM64 build requires an ARM64 build host.
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
 
     steps:
 
-      # ==========================================================
+      # ========================================================
       # Checkout workflow repository
-      # ==========================================================
+      # ========================================================
 
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ==========================================================
+      # ========================================================
       # Host dependencies
       #
-      # Proton does most compilation inside its SteamRT SDK
-      # container. Host side mainly needs Git, Docker/Podman,
-      # ccache, Python, build tools, etc.
-      # ==========================================================
+      # IMPORTANT:
+      # Do NOT install docker.io.
+      # GitHub ARM64 runner already provides Docker.
+      # ========================================================
 
       - name: Install host dependencies
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           sudo apt-get update
 
@@ -89,32 +86,83 @@ jobs:
             cmake \
             ninja-build \
             meson \
-            pkg-config \
-            docker.io
+            pkg-config
 
+          echo "========================================"
+          echo "Host tools"
+          echo "========================================"
 
-      # ==========================================================
-      # Docker
-      # ==========================================================
+          git --version
+          python3 --version
+          cmake --version
+          ninja --version
+          meson --version
+          ccache --version
 
-      - name: Start Docker
+      # ========================================================
+      # Verify ARM64 host
+      # ========================================================
+
+      - name: Verify ARM64 host
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          sudo systemctl enable --now docker
+          echo "========================================"
+          echo "Host"
+          echo "========================================"
 
-          docker version
+          uname -a
 
+          echo "Machine:"
+          uname -m
+
+          echo "Debian architecture:"
+          dpkg --print-architecture
+
+          echo "CPU:"
+          lscpu
+
+          test "$(uname -m)" = "aarch64"
+
+      # ========================================================
+      # Verify Docker
+      # ========================================================
+
+      - name: Verify Docker
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo "Docker"
+          echo "========================================"
+
+          command -v docker
+          docker --version
           docker info
 
+      # ========================================================
+      # Restore ccache
+      # ========================================================
 
-      # ==========================================================
-      # ccache
-      # ==========================================================
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: proton-arm64ec-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            proton-arm64ec-${{ github.ref_name }}-
+            proton-arm64ec-
+
+      # ========================================================
+      # Configure ccache
+      # ========================================================
 
       - name: Configure ccache
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           mkdir -p "$CCACHE_DIR"
 
@@ -122,500 +170,517 @@ jobs:
           ccache --set-config=max_size=5G
           ccache --set-config=compression=true
 
+          ccache --show-config
           ccache --zero-stats
 
-
-      # ==========================================================
-      # Restore ccache
-      # ==========================================================
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: proton-arm64ec-${{ env.PROTON_REF }}-${{ github.sha }}
-
-          restore-keys: |
-            proton-arm64ec-${{ env.PROTON_REF }}-
-            proton-arm64ec-
-
-
-      # ==========================================================
+      # ========================================================
       # Clone Valve Proton
-      # ==========================================================
+      # ========================================================
 
       - name: Clone Valve Proton
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          rm -rf proton
+          rm -rf "$GITHUB_WORKSPACE/proton"
 
           git clone \
-            --recurse-submodules \
+            --filter=blob:none \
+            --no-checkout \
             "$PROTON_REPO" \
-            proton
+            "$GITHUB_WORKSPACE/proton"
 
-          cd proton
+          cd "$GITHUB_WORKSPACE/proton"
 
           git fetch \
             --depth=1 \
             origin \
             "$PROTON_REF"
 
-          git checkout "$PROTON_REF"
+          git checkout --detach FETCH_HEAD
 
-          git submodule update --init --recursive
+          git submodule update \
+            --init \
+            --recursive
 
-          echo
           echo "========================================"
           echo "Proton revision"
           echo "========================================"
 
           git rev-parse HEAD
 
-          echo
+          echo "Requested ref:"
+          echo "$PROTON_REF"
+
           echo "========================================"
           echo "Submodules"
           echo "========================================"
 
           git submodule status
 
+      # ========================================================
+      # Verify Valve ARM64 / ARM64EC source
+      # ========================================================
 
-      # ==========================================================
-      # Verify ARM64 host
-      # ==========================================================
-
-      - name: Verify ARM64 host
-        run: |
-          set -eux
-
-          echo "uname:"
-          uname -a
-
-          echo
-          echo "machine:"
-          uname -m
-
-          echo
-          echo "architecture:"
-          dpkg --print-architecture
-
-          echo
-          echo "CPU:"
-          lscpu
-
-
-      # ==========================================================
-      # Verify Valve ARM64EC support
-      # ==========================================================
-
-      - name: Verify Proton ARM64EC support
+      - name: Verify Valve ARM64 ARM64EC support
         working-directory: proton
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           echo "========================================"
           echo "TARGET_ARCH"
           echo "========================================"
 
           grep -n \
-            -E \
-            'TARGET_ARCH|arm64|aarch64' \
+            'TARGET_ARCH' \
             Makefile.in \
-            | head -100
+            | head -50
 
-
-          echo
           echo "========================================"
-          echo "ARM64EC"
+          echo "ARM64 SDK"
+          echo "========================================"
+
+          grep -n \
+            'arm64-llvm' \
+            Makefile.in
+
+          echo "========================================"
+          echo "ARM64 flags"
+          echo "========================================"
+
+          grep -n \
+            -E \
+            'aarch64_CFLAGS|arm64ec_CFLAGS' \
+            Makefile.in \
+            || true
+
+          echo "========================================"
+          echo "ARM64EC target"
+          echo "========================================"
+
+          grep -n \
+            'arm64ec-windows' \
+            Makefile.in \
+            | head -50
+
+      # ========================================================
+      # Create build directory
+      # ========================================================
+
+      - name: Create Proton build directory
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/proton-build"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/proton-build"
+
+      # ========================================================
+      # Configure Valve Proton ARM64
+      # ========================================================
+
+      - name: Configure Proton ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$GITHUB_WORKSPACE/proton-build"
+
+          "$GITHUB_WORKSPACE/proton/configure.sh" \
+            --target-arch=arm64 \
+            --enable-ccache \
+            --build-name="$BUILD_NAME"
+
+          test -f Makefile
+
+      # ========================================================
+      # Inspect generated Makefile
+      # ========================================================
+
+      - name: Inspect generated configuration
+        working-directory: proton-build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          test -f Makefile
+
+          echo "========================================"
+          echo "TARGET_ARCH"
+          echo "========================================"
+
+          grep -n \
+            'TARGET_ARCH' \
+            Makefile \
+            | head -50
+
+          echo "========================================"
+          echo "SteamRT"
+          echo "========================================"
+
+          grep -n \
+            'STEAMRT_IMAGE' \
+            Makefile
+
+          echo "========================================"
+          echo "ARM64 SDK"
+          echo "========================================"
+
+          grep -n \
+            'arm64-llvm' \
+            Makefile
+
+          echo "========================================"
+          echo "ARM64EC target"
+          echo "========================================"
+
+          grep -n \
+            'arm64ec-windows' \
+            "$GITHUB_WORKSPACE/proton/Makefile.in" \
+            | head -50
+
+      # ========================================================
+      # Test Proton SDK container
+      # ========================================================
+
+      - name: Test Proton SDK container
+        working-directory: proton-build
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "========================================"
+          echo "SteamRT image"
+          echo "========================================"
+
+          make \
+            --no-print-directory \
+            get-steamrt-image
+
+          echo "========================================"
+          echo "Testing Proton container"
+          echo "========================================"
+
+          make \
+            --no-print-directory \
+            test-container
+
+      # ========================================================
+      # Build Proton
+      # ========================================================
+
+      - name: Build Proton ARM64EC
+        working-directory: proton-build
+        shell: bash
+        run: |
+          set -o pipefail
+
+          JOBS="$(nproc)"
+
+          echo "========================================"
+          echo "Building Proton"
+          echo "========================================"
+
+          echo "Jobs: $JOBS"
+
+          if [ "${{ inputs.unstripped }}" = "true" ]; then
+            make \
+              -j"$JOBS" \
+              UNSTRIPPED_BUILD=1 \
+              2>&1 | tee "$GITHUB_WORKSPACE/proton-build.log"
+          else
+            make \
+              -j"$JOBS" \
+              2>&1 | tee "$GITHUB_WORKSPACE/proton-build.log"
+          fi
+
+          status="${PIPESTATUS[0]}"
+
+          exit "$status"
+
+      # ========================================================
+      # Build Proton redist
+      # ========================================================
+
+      - name: Build Proton redist
+        working-directory: proton-build
+        shell: bash
+        run: |
+          set -o pipefail
+
+          echo "========================================"
+          echo "Building redist"
+          echo "========================================"
+
+          make \
+            -j"$(nproc)" \
+            redist \
+            2>&1 | tee "$GITHUB_WORKSPACE/proton-redist.log"
+
+          status="${PIPESTATUS[0]}"
+
+          exit "$status"
+
+      # ========================================================
+      # Verify redist
+      # ========================================================
+
+      - name: Verify Proton redist
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          REDIST="$GITHUB_WORKSPACE/proton-build/redist"
+
+          test -d "$REDIST"
+
+          echo "========================================"
+          echo "Redist contents"
+          echo "========================================"
+
+          find "$REDIST" \
+            -maxdepth 5 \
+            -type f \
+            | head -500
+
+          echo "========================================"
+          echo "Redist size"
+          echo "========================================"
+
+          du -sh "$REDIST"
+
+      # ========================================================
+      # Verify ARM64 Unix binaries
+      # ========================================================
+
+      - name: Verify ARM64 Unix binaries
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          REDIST="$GITHUB_WORKSPACE/proton-build/redist"
+
+          echo "========================================"
+          echo "ARM64 / AArch64 binaries"
+          echo "========================================"
+
+          FOUND=0
+
+          while IFS= read -r -d '' f; do
+            info="$(file "$f" || true)"
+
+            if echo "$info" | grep -Eiq \
+              'ELF 64-bit.*ARM aarch64'; then
+
+              echo "$info"
+              FOUND=1
+            fi
+
+          done < <(
+            find "$REDIST" \
+              -type f \
+              -print0
+          )
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "ERROR: No AArch64 ELF binaries were found."
+            exit 1
+          fi
+
+      # ========================================================
+      # Verify ARM64EC / FEX artifacts
+      # ========================================================
+
+      - name: Verify ARM64EC FEX artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          BUILD_DIR="$GITHUB_WORKSPACE/proton-build"
+          REDIST="$BUILD_DIR/redist"
+
+          echo "========================================"
+          echo "FEX / ARM64EC build artifacts"
+          echo "========================================"
+
+          echo "Build tree:"
+
+          find "$BUILD_DIR" \
+            \( \
+              -iname '*fex*' \
+              -o -iname '*arm64ec*' \
+            \) \
+            -print \
+            | head -500 \
+            || true
+
+          echo "========================================"
+          echo "Redist:"
+          echo "========================================"
+
+          find "$REDIST" \
+            \( \
+              -iname '*fex*' \
+              -o -iname '*arm64ec*' \
+            \) \
+            -print \
+            | head -500 \
+            || true
+
+          echo "========================================"
+          echo "ARM64EC / FEX log references"
           echo "========================================"
 
           grep -R \
             -n \
             -E \
-            'arm64ec|ARM64EC' \
-            Makefile.in \
-            wine \
-            FEX \
-            vkd3d-proton \
-            dxvk \
+            'arm64ec|ARM64EC|FEX' \
+            "$GITHUB_WORKSPACE/proton-build.log" \
+            "$GITHUB_WORKSPACE/proton-redist.log" \
             2>/dev/null \
             | head -300 \
             || true
 
-
-      # ==========================================================
-      # Test Proton SDK container
-      # ==========================================================
-
-      - name: Test Proton SDK container
-        working-directory: proton
-        run: |
-          set -eux
-
-          make \
-            build_name="$BUILD_NAME" \
-            --no-print-directory \
-            test-container
-
-
-      # ==========================================================
-      # Configure Proton ARM64
-      #
-      # IMPORTANT:
-      #
-      # We intentionally use Valve's configure.sh.
-      #
-      # Do NOT manually configure Wine here.
-      # ==========================================================
-
-      - name: Configure Proton ARM64
-        working-directory: proton
-        run: |
-          set -eux
-
-          rm -rf "build/build-${BUILD_NAME}"
-
-          make \
-            build_name="$BUILD_NAME" \
-            enable_ccache=1 \
-            configure
-
-
-      # ==========================================================
-      # Show generated configuration
-      # ==========================================================
-
-      - name: Inspect generated configuration
-        working-directory: proton
-        run: |
-          set -eux
-
-          BUILD_DIR="build/build-${BUILD_NAME}"
-
-          test -f "$BUILD_DIR/Makefile"
-
-          echo "Build directory:"
-          echo "$BUILD_DIR"
-
-          echo
-          echo "Target architecture:"
-
-          grep -n \
-            -E \
-            'TARGET_ARCH|STEAMRT_IMAGE' \
-            "$BUILD_DIR/Makefile" \
-            | head -50
-
-
-          echo
-          echo "Windows architectures:"
-
-          grep -n \
-            -E \
-            'ARCHS|windows_ARCHS|unix_ARCHS' \
-            "$BUILD_DIR/Makefile" \
-            | head -80
-
-
-      # ==========================================================
-      # Build Proton
-      #
-      # This invokes Valve's own SteamRT ARM64 container.
-      #
-      # It builds:
-      #
-      #   aarch64-unix
-      #   aarch64-windows
-      #   arm64ec-windows
-      #   x86_64-windows
-      #   i386-windows
-      #
-      # plus FEX / DXVK / VKD3D-Proton and other dependencies.
-      # ==========================================================
-
-      - name: Build Proton ARM64EC
-        working-directory: proton
-        run: |
-          set -o pipefail
-
-          if [ "${{ github.event.inputs.unstripped }}" = "true" ]; then
-            make \
-              build_name="$BUILD_NAME" \
-              enable_ccache=1 \
-              UNSTRIPPED_BUILD=1 \
-              proton \
-              2>&1 | tee ../proton-build.log
-          else
-            make \
-              build_name="$BUILD_NAME" \
-              enable_ccache=1 \
-              proton \
-              2>&1 | tee ../proton-build.log
-          fi
-
-
-      # ==========================================================
-      # Build redist package
-      # ==========================================================
-
-      - name: Build Proton redist
-        working-directory: proton
-        run: |
-          set -o pipefail
-
-          make \
-            build_name="$BUILD_NAME" \
-            enable_ccache=1 \
-            redist \
-            2>&1 | tee ../proton-redist.log
-
-
-      # ==========================================================
-      # Inspect output
-      # ==========================================================
-
-      - name: Inspect Proton output
-        working-directory: proton
-        run: |
-          set -eux
-
-          echo "========================================"
-          echo "Build directory"
-          echo "========================================"
-
-          find "build/build-${BUILD_NAME}" \
-            -maxdepth 3 \
-            -type f \
-            | head -200
-
-
-          echo
-          echo "========================================"
-          echo "Redist"
-          echo "========================================"
-
-          find "build/${BUILD_NAME}" \
-            -maxdepth 4 \
-            -type f \
-            | head -300
-
-
-          echo
-          echo "========================================"
-          echo "Size"
-          echo "========================================"
-
-          du -sh \
-            "build/build-${BUILD_NAME}" \
-            "build/${BUILD_NAME}" \
-            2>/dev/null \
-            || true
-
-
-      # ==========================================================
-      # Verify important ARM64EC files
-      # ==========================================================
-
-      - name: Verify ARM64EC artifacts
-        working-directory: proton
-        run: |
-          set -eux
-
-          BUILD_DIR="build/build-${BUILD_NAME}"
-
-          echo "Searching for ARM64EC binaries..."
-
-          find "$BUILD_DIR" \
-            -type f \
-            \( \
-              -name '*.dll' \
-              -o -name '*.exe' \
-              -o -name '*.so' \
-            \) \
-            -print \
-            | while read -r f; do
-
-                if file "$f" | grep -qi \
-                  'ARM64\|aarch64'; then
-
-                  echo
-                  echo "ARM64:"
-                  file "$f"
-
-                fi
-
-              done \
-            | head -200 \
-            || true
-
-
-      # ==========================================================
-      # Search FEX ARM64EC
-      # ==========================================================
-
-      - name: Verify FEX ARM64EC
-        working-directory: proton
-        run: |
-          set -eux
-
-          BUILD_DIR="build/build-${BUILD_NAME}"
-
-          echo "FEX artifacts:"
-
-          find "$BUILD_DIR" \
-            -iname '*fex*' \
-            -o -iname '*arm64ec*' \
-            | head -300 \
-            || true
-
-
-      # ==========================================================
-      # Save build information
-      # ==========================================================
+      # ========================================================
+      # Generate build information
+      # ========================================================
 
       - name: Generate build information
-        working-directory: proton
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          BUILD_DIR="build/build-${BUILD_NAME}"
+          BUILD_DIR="$GITHUB_WORKSPACE/proton-build"
 
           mkdir -p \
             "$BUILD_DIR/build-info"
 
           {
-            echo "Proton repository:"
+            echo "Valve Proton ARM64EC build"
+            echo
+            echo "Repository:"
             echo "$PROTON_REPO"
-
             echo
-
-            echo "Proton ref:"
+            echo "Requested ref:"
             echo "$PROTON_REF"
-
             echo
-
-            echo "Proton commit:"
-            git rev-parse HEAD
-
+            echo "Commit:"
+            git \
+              -C "$GITHUB_WORKSPACE/proton" \
+              rev-parse HEAD
             echo
-
             echo "Build name:"
             echo "$BUILD_NAME"
-
             echo
-
             echo "Host:"
             uname -a
-
             echo
-
             echo "Architecture:"
             uname -m
-
             echo
-
-            echo "ARM64EC support:"
-            grep -R \
-              -n \
-              -m 20 \
+            echo "Target:"
+            grep \
               -E \
-              'arm64ec|ARM64EC' \
-              Makefile.in \
+              '^TARGET_ARCH' \
+              "$BUILD_DIR/Makefile" \
               || true
-
+            echo
+            echo "SteamRT:"
+            grep \
+              -E \
+              '^STEAMRT_IMAGE' \
+              "$BUILD_DIR/Makefile" \
+              || true
           } > \
             "$BUILD_DIR/build-info/build-info.txt"
 
-
-      # ==========================================================
-      # Extract redist
-      # ==========================================================
-
-      - name: Locate redist
-        working-directory: proton
-        run: |
-          set -eux
-
-          find build \
-            -maxdepth 3 \
-            -type d \
-            -name redist \
-            -print
-
-
-      # ==========================================================
-      # Package for Termux glibc
-      # ==========================================================
+      # ========================================================
+      # Create Termux package
+      # ========================================================
 
       - name: Create Termux package
-        working-directory: proton
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          REDIST="build/${BUILD_NAME}"
+          REDIST="$GITHUB_WORKSPACE/proton-build/redist"
+          PACKAGE="$GITHUB_WORKSPACE/termux-proton"
 
           test -d "$REDIST"
 
-          mkdir -p ../termux-proton
+          rm -rf "$PACKAGE"
+
+          mkdir -p "$PACKAGE"
 
           cp -a \
             "$REDIST/." \
-            ../termux-proton/
+            "$PACKAGE/"
 
           mkdir -p \
-            ../termux-proton/termux
+            "$PACKAGE/termux"
 
-          cat > \
-            ../termux-proton/termux/README-TERMUX.txt \
-            <<'EOF'
-          Valve Proton ARM64EC build
+          printf '%s\n' \
+            'Valve Proton ARM64 / ARM64EC build' \
+            '' \
+            'Source:' \
+            '  ValveSoftware/Proton' \
+            '' \
+            'Target:' \
+            '  Linux AArch64' \
+            '  Termux glibc' \
+            '' \
+            'Windows targets:' \
+            '  i386' \
+            '  x86_64' \
+            '  aarch64' \
+            '  ARM64EC' \
+            '' \
+            'This package is built from Valve'\''s official Proton source.' \
+            '' \
+            'The ARM64 Unix binaries are Linux/glibc binaries.' \
+            'They are not Android bionic binaries.' \
+            '' \
+            'For Termux glibc, use the Termux glibc runtime.' \
+            '' \
+            'Example:' \
+            '' \
+            '  $PREFIX/glibc/lib/ld-linux-aarch64.so.1 \' \
+            '    path/to/proton/files/bin-arm64/wine' \
+            '' \
+            'Check the exact Wine path in the generated package.' \
+            '' \
+            'This workflow does not automatically patch Proton'\''s' \
+            'runtime paths for Termux.' \
+            > "$PACKAGE/termux/README-TERMUX.txt"
 
-          Target:
-            Linux AArch64 / Termux glibc
+          cp \
+            "$GITHUB_WORKSPACE/proton-build/build-info/build-info.txt" \
+            "$PACKAGE/termux/build-info.txt"
 
-          Windows PE architectures:
-            i386
-            x86_64
-            aarch64
-            ARM64EC
-
-          IMPORTANT:
-            This package is built from ValveSoftware/Proton.
-            It is not a normal desktop x86_64 Proton build.
-
-          For Termux glibc:
-            Do not use the Android bionic Wine binary.
-            Run the AArch64 Unix Wine binary through the
-            Termux glibc loader.
-
-          Example:
-
-            $PREFIX/glibc/lib/ld-linux-aarch64.so.1 \
-              path/to/proton/files/bin-arm64/wine
-
-          Adjust the exact Wine path according to the
-          contents of this build.
-          EOF
-
-
-      # ==========================================================
-      # Compress
-      # ==========================================================
+      # ========================================================
+      # Compress package
+      # ========================================================
 
       - name: Compress Termux package
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           tar \
             -cJf \
             "${BUILD_NAME}-termux-glibc-arm64ec.tar.xz" \
+            -C "$GITHUB_WORKSPACE" \
             termux-proton
 
+          ls -lh \
+            "${BUILD_NAME}-termux-glibc-arm64ec.tar.xz"
 
-      # ==========================================================
+      # ========================================================
       # Upload build logs
-      # ==========================================================
+      # ========================================================
 
       - name: Upload build logs
         if: always()
@@ -625,27 +690,28 @@ jobs:
           path: |
             proton-build.log
             proton-redist.log
-            proton/build/build-${{ env.BUILD_NAME }}/build-info/
+            proton-build/build-info/
+          if-no-files-found: warn
+          retention-days: 30
 
-
-      # ==========================================================
-      # Upload Proton artifact
-      # ==========================================================
+      # ========================================================
+      # Upload Proton package
+      # ========================================================
 
       - name: Upload Proton package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BUILD_NAME }}-arm64ec
-          path: |
-            ${{ env.BUILD_NAME }}-termux-glibc-arm64ec.tar.xz
+          path: ${{ env.BUILD_NAME }}-termux-glibc-arm64ec.tar.xz
+          if-no-files-found: error
           retention-days: 30
 
-
-      # ==========================================================
+      # ========================================================
       # ccache statistics
-      # ==========================================================
+      # ========================================================
 
       - name: ccache statistics
         if: always()
+        shell: bash
         run: |
-          ccache --show-stats
+          ccache --show-stats || true
