@@ -7,7 +7,6 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-
       proton_ref:
         description: 'Valve Proton branch/tag/commit'
         required: true
@@ -149,9 +148,8 @@ jobs:
       #
       # Do NOT install docker.io.
       #
-      # GitHub ARM runners already provide Docker.
-      #
-      # Installing docker.io may conflict with containerd.io.
+      # GitHub ARM runner already provides Docker.
+      # Installing docker.io can conflict with containerd.io.
       # ============================================================
 
       - name: Install host dependencies
@@ -261,15 +259,6 @@ jobs:
 
       # ============================================================
       # Clone Valve Proton
-      #
-      # Supports:
-      #
-      # branch
-      # tag
-      # commit
-      #
-      # --no-checkout + fetch + FETCH_HEAD avoids shallow
-      # checkout problems with detached commits.
       # ============================================================
 
       - name: Clone Valve Proton
@@ -404,8 +393,6 @@ jobs:
 
       # ============================================================
       # Configure Proton ARM64
-      #
-      # Official Valve ARM64 build path.
       # ============================================================
 
       - name: Configure Proton ARM64
@@ -432,11 +419,18 @@ jobs:
       # ============================================================
       # Inspect generated configuration
       #
-      # DO NOT:
+      # IMPORTANT:
       #
-      # grep STEAMRT_IMAGE Makefile
+      # get-steamrt-image prints the recipe itself because make
+      # echoes the command before executing it.
       #
-      # Valve exposes get-steamrt-image for the evaluated value.
+      # Therefore:
+      #
+      # IMAGE="$(make get-steamrt-image)"
+      #
+      # is WRONG.
+      #
+      # We extract the actual registry URL from the output.
       # ============================================================
 
       - name: Inspect generated configuration
@@ -461,13 +455,35 @@ jobs:
           echo "STEAMRT IMAGE"
           echo "========================================"
 
+          make \
+            --no-print-directory \
+            get-steamrt-image \
+            | tee steamrt-image.log
+
           IMAGE="$(
-            make \
-              --no-print-directory \
-              get-steamrt-image
+            grep -E \
+              '^registry\.gitlab\.steamos\.cloud/' \
+              steamrt-image.log \
+              | tail -1
           )"
 
+          if [ -z "$IMAGE" ]; then
+            echo "::error::Failed to extract SteamRT image from make output."
+
+            echo
+            echo "Raw output:"
+            cat steamrt-image.log
+
+            exit 1
+          fi
+
+          echo
+          echo "Resolved SteamRT:"
           echo "$IMAGE"
+
+          echo
+          echo "Expected SteamRT:"
+          echo "$STEAMRT_IMAGE"
 
           if [ "$IMAGE" != "$STEAMRT_IMAGE" ]; then
 
@@ -480,6 +496,10 @@ jobs:
             echo
             echo "Actual:"
             echo "$IMAGE"
+
+            echo
+            echo "Raw make output:"
+            cat steamrt-image.log
 
             exit 1
           fi
@@ -527,6 +547,11 @@ jobs:
 
       # ============================================================
       # Print build configuration
+      #
+      # IMPORTANT:
+      #
+      # Again, parse the actual URL rather than assigning the
+      # complete make output.
       # ============================================================
 
       - name: Print build configuration
@@ -556,7 +581,10 @@ jobs:
 
           make \
             --no-print-directory \
-            get-steamrt-image
+            get-steamrt-image \
+            | grep -E \
+              '^registry\.gitlab\.steamos\.cloud/' \
+            | tail -1
 
           echo
           echo "Jobs:"
@@ -565,6 +593,14 @@ jobs:
           echo
           echo "Unstripped:"
           echo "${{ inputs.unstripped }}"
+
+          echo
+          echo "Target:"
+          grep \
+            -n \
+            'TARGET_ARCH' \
+            Makefile \
+            | head -10
 
           echo
           echo "ccache:"
@@ -664,7 +700,7 @@ jobs:
 
 
       # ============================================================
-      # Create official Proton redist
+      # Create Proton redist
       # ============================================================
 
       - name: Create Proton redist
@@ -824,7 +860,7 @@ jobs:
 
 
       # ============================================================
-      # Verify ARM64 / ARM64EC / FEX artifacts
+      # Verify ARM64EC / FEX artifacts
       # ============================================================
 
       - name: Verify ARM64EC and FEX artifacts
@@ -865,7 +901,7 @@ jobs:
 
 
       # ============================================================
-      # Generate build information
+      # Generate Termux build information
       # ============================================================
 
       - name: Generate build info
@@ -896,7 +932,10 @@ jobs:
           STEAMRT="$(
             make \
               --no-print-directory \
-              get-steamrt-image
+              get-steamrt-image \
+              | grep -E \
+                '^registry\.gitlab\.steamos\.cloud/' \
+              | tail -1
           )"
 
           BUILD_TIME="$(
@@ -956,7 +995,7 @@ jobs:
 
 
       # ============================================================
-      # Package Proton
+      # Package Termux Proton
       # ============================================================
 
       - name: Package Termux Proton
@@ -1055,7 +1094,7 @@ jobs:
 
 
       # ============================================================
-      # Verify package
+      # Verify final package
       # ============================================================
 
       - name: Verify final package
@@ -1068,7 +1107,13 @@ jobs:
           echo "FINAL PACKAGE CHECK"
           echo "========================================"
 
-          PACKAGE_FILE="$(find . -maxdepth 1 -type f -name '*.tar.xz' | head -1)"
+          PACKAGE_FILE="$(
+            find . \
+              -maxdepth 1 \
+              -type f \
+              -name '*.tar.xz' \
+              | head -1
+          )"
 
           if [ -z "$PACKAGE_FILE" ]; then
             echo "::error::No .tar.xz package found."
@@ -1103,7 +1148,7 @@ jobs:
 
 
       # ============================================================
-      # Upload official Proton redist
+      # Upload Proton redist
       # ============================================================
 
       - name: Upload Proton redist
@@ -1152,6 +1197,7 @@ jobs:
           path: |
             proton-build/build.log
             proton-build/redist.log
+            proton-build/steamrt-image.log
 
           if-no-files-found: ignore
 
