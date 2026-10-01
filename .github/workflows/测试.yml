@@ -227,8 +227,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p /data/data/com.termux/files/usr/tmp
-          chmod 1777 /data/data/com.termux/files/usr/tmp
+          sudo mkdir -p /data/data/com.termux/files/usr/tmp
+          sudo chmod 1777 /data/data/com.termux/files/usr/tmp
 
           TERMUX_TMP="/data/data/com.termux/files/usr/tmp"
 
