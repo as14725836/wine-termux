@@ -330,28 +330,35 @@ jobs:
             _fam="${_bad%-*.patch}"          # 去掉 -<commit>.patch，得到家族名
             echo "⚠️ 失败补丁: ${_bad} (家族: ${_fam})"
             _hit=0
-            # 注意：chroot 内 /tmp 常是独立挂载，`find / -xdev` 会漏掉它，
-            #       所以显式扫多个根目录（TkG 的 userpatch 会在 /tmp 下）。
+            # chroot 里没有 /dev/fd，不能用 < <(...) 进程替换；改成写临时文件再读
+            _list=/tmp/_patch_hits.txt
+            : > "${_list}"
             for _pat in "${_bad}" "${_fam}"; do
               [ -n "${_pat}" ] || continue
               for _root in /tmp /root /home /var/tmp /opt /usr/src /build /srv; do
                 [ -d "${_root}" ] || continue
-                while IFS= read -r _x; do
-                  [ -n "${_x}" ] || continue
-                  echo "   rm ${_x}"
-                  rm -f "${_x}" && _hit=1
-                done < <(find "${_root}" -name "${_pat}*" -type f 2>/dev/null | head -10)
+                find "${_root}" -name "${_pat}*" -type f 2>/dev/null | head -10 >> "${_list}"
               done
             done
+            sort -u "${_list}" -o "${_list}" 2>/dev/null || true
+            echo "--- 命中候选 ---"
+            cat "${_list}"
+            while IFS= read -r _x; do
+              [ -n "${_x}" ] || continue
+              echo "   rm ${_x}"
+              rm -f "${_x}" && _hit=1
+            done < "${_list}"
             if [ "${_hit}" = "0" ]; then
               echo "❌ 找不到补丁文件；打印诊断："
-              echo "--- *userpatch* 目录下的所有 .patch ---"
+              echo "--- *userpatch* 目录下的 .patch ---"
               find /tmp /root /opt -name '*.patch' -path '*userpatch*' 2>/dev/null | head -40
               echo "--- TkG userpatches 目录 ---"
               ls -la /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches 2>/dev/null | head -30
-              echo "--- 挂载情况（看 /tmp 是否独立挂载）---"
-              mount 2>/dev/null | grep -E ' / | /tmp ' | head -5
-              echo "--- 日志里出现的 *.patch 名字 ---"
+              echo "--- TkG 顶层 ---"
+              ls -la /tmp/wine-tkg-git/wine-tkg-git 2>/dev/null | head -30
+              echo "--- 挂载情况 ---"
+              mount 2>/dev/null | head -20
+              echo "--- 日志里出现过的 *.patch ---"
               grep -aoE '[A-Za-z0-9_.+-]+\\.patch' /tmp/tkg_build.out | sort -u | head -30
               exit 1
             fi
