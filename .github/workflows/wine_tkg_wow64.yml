@@ -324,14 +324,26 @@ jobs:
             echo "⚠️ TkG build failed (attempt $_try), 最后 20 行："
             tail -20 /tmp/tkg_build.out
             _bad=$(grep -oE 'Applying [^ ]+\.patch' /tmp/tkg_build.out | tail -1 | sed 's/^Applying //')
-            _f="/tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches/${_bad}"
-            if [ -n "${_bad}" ] && [ -f "${_f}" ]; then
-              echo "⚠️ 补丁 ${_bad} 打不上，移除后重试"
-              rm -f "${_f}"
-            else
-              echo "❌ 无法定位失败的 userpatch（_bad='${_bad}'），停止"
+            if [ -z "${_bad}" ]; then
+              _bad=$(grep -oE '[A-Za-z0-9_.+-]+\.patch' /tmp/tkg_build.out | tail -1)
+            fi
+            _fam="${_bad%-*.patch}"          # 去掉 -<commit>.patch，得到家族名
+            echo "⚠️ 失败补丁: ${_bad} (家族: ${_fam})"
+            _hit=0
+            # 用 find 全盘定位（TkG 的 userpatch 目录位置随版本变化，不能写死）
+            for _pat in "${_bad}" "${_fam}"; do
+              [ -n "${_pat}" ] || continue
+              while IFS= read -r _x; do
+                [ -n "${_x}" ] || continue
+                echo "   rm ${_x}"
+                rm -f "${_x}" && _hit=1
+              done < <(find / -xdev -name "${_pat}*" -type f -not -path '/proc/*' -not -path '/sys/*' 2>/dev/null | head -10)
+            done
+            if [ "${_hit}" = "0" ]; then
+              echo "❌ 找不到补丁文件，停止"
               exit 1
             fi
+            echo "⚠️ 已移除打不上的补丁，重试"
           done
           [ "${_tkg_ok}" = "1" ] || { echo "❌ 重试多次仍失败"; exit 1; }
           cd /tmp/output/
