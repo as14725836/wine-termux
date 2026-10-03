@@ -258,7 +258,8 @@ jobs:
             # ---- adapted-11.18 user patches ----
             for _up in 0060-quartz-implement-colour-filter.patch \
                        0061-qasf-deliver-compressed-asf-streams.patch \
-                       termux-dns-fix.patch; do
+                       termux-dns-fix.patch \
+                       wine-virtual-memory.patch; do
               local _up_file="/tmp/wine-termux/$_up"
               local _up_url="https://raw.githubusercontent.com/as14725836/wine-termux/main/$_up"
               if [ ! -f "$_up_file" ]; then
@@ -276,6 +277,34 @@ jobs:
               fi
             done
             
+            # ---- wine-virtual-memory.patch 校验 + 兜底（ARM64 39-bit VA 适配）----
+            # 目标（补丁内容）：
+            #   dlls/ntdll/unix/virtual.c : 三行 limit 0x7fffffff0000 -> 0x7fffff0000
+            #   server/mapping.c          : free_map_addr(0x600000000000,0x100000000000) -> (0x4000000000,0x1000000000)
+            #   loader/preloader.c        : `#ifdef __aarch64__` -> `#if 1`
+            if [ -f "dlls/ntdll/unix/virtual.c" ] && [ -f "server/mapping.c" ]; then
+              VMC=$(grep -c '0x7fffff0000' dlls/ntdll/unix/virtual.c || true)
+              if [ "${VMC}" = "0" ]; then
+                warning "wine-virtual-memory 未生效 -> sed/perl 兜底"
+                perl -pi -e 's/0x7fffffff0000/0x7fffff0000/ if /(address_space_limit|user_space_limit|working_set_limit)/' dlls/ntdll/unix/virtual.c
+                sed -i 's/free_map_addr( 0x600000000000, 0x100000000000 )/free_map_addr( 0x4000000000, 0x1000000000 )/' server/mapping.c
+                if [ -f loader/preloader.c ]; then
+                  perl -0pi -e 's/(preload_info\[i\]\.addr >= \(void \*\)0x10000\n)#ifdef __aarch64__/$1#if 1/' loader/preloader.c
+                fi
+              fi
+              VMC=$(grep -c '0x7fffff0000' dlls/ntdll/unix/virtual.c || true)
+              MPC=$(grep -c 'free_map_addr( 0x4000000000, 0x1000000000 )' server/mapping.c || true)
+              PLC=$(grep -c '#if 1' loader/preloader.c 2>/dev/null || echo 0)
+              msg2 "wine-virtual-memory check: virtual.c=${VMC} mapping.c=${MPC} preloader=${PLC}"
+              if [ "${VMC}" = "0" ]; then
+                echo "!!! FAIL: wine-virtual-memory 未生效（virtual.c 无 0x7fffff0000）"
+                exit 1
+              fi
+            else
+              warning "wine-virtual-memory: 找不到目标文件，跳过"
+            fi
+            # ---- wine-virtual-memory 结束 ----
+
             # --- .rej hard check ---
             if find . -name '*.rej' | head -5 | grep -q .; then
               warning "!!! .rej files detected:"
