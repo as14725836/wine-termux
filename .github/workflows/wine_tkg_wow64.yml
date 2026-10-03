@@ -25,6 +25,15 @@ on:
         required: false
         type: boolean
         default: true
+      skip_39bit:
+        description: "跳过 39-bit VA 适配（对照实验：判断崩溃是补丁引起还是上游引起）"
+        required: false
+        type: boolean
+        default: false
+      pkg_suffix:
+        description: "产物后缀（如 no39bit），体现在 Release tag / 源码分支名，避免覆盖现有包"
+        required: false
+        type: string
   schedule:
     - cron: "0 1 * * *"
 
@@ -101,6 +110,11 @@ jobs:
           pkg_name="dxgi"
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
+          fi
+          pkg_suffix="${{ github.event.inputs.pkg_suffix }}"
+          if [ -n "$pkg_suffix" ]; then
+            pkg_name="${pkg_name}-${pkg_suffix}"
+            echo "pkg_suffix=$pkg_suffix -> PKG_NAME=$pkg_name"
           fi
           echo "wine_tag=$wine_tag" >> "$GITHUB_OUTPUT"
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
@@ -261,6 +275,14 @@ jobs:
                        termux-dns-fix.patch \
                        wine-virtual-memory.patch \
                        wine-virtual-memory-39bit-hiarea.patch; do
+              case "$_up" in
+                wine-virtual-memory*)
+                  if [ -f /tmp/wine-termux/.skip39bit ]; then
+                    warning "SKIP39BIT: 跳过 userpatch $_up"
+                    continue
+                  fi
+                  ;;
+              esac
               local _up_file="/tmp/wine-termux/$_up"
               local _up_url="https://raw.githubusercontent.com/as14725836/wine-termux/main/$_up"
               if [ ! -f "$_up_file" ]; then
@@ -283,7 +305,9 @@ jobs:
             #   dlls/ntdll/unix/virtual.c : 三行 limit 0x7fffffff0000 -> 0x7fffff0000
             #   server/mapping.c          : free_map_addr(0x600000000000,0x100000000000) -> (0x4000000000,0x1000000000)
             #   loader/preloader.c        : `#ifdef __aarch64__` -> `#if 1`
-            if [ -f "dlls/ntdll/unix/virtual.c" ] && [ -f "server/mapping.c" ]; then
+            if [ -f /tmp/wine-termux/.skip39bit ]; then
+              warning "SKIP39BIT: 跳过 wine-virtual-memory 适配（对照构建）"
+            elif [ -f "dlls/ntdll/unix/virtual.c" ] && [ -f "server/mapping.c" ]; then
               VMC=$(grep -c '0x7fffff0000' dlls/ntdll/unix/virtual.c || true)
               if [ "${VMC}" = "0" ]; then
                 warning "wine-virtual-memory 未生效 -> sed/perl 兜底"
@@ -309,7 +333,9 @@ jobs:
           # wine-virtual-memory.patch 只把三个 limit 降到 0x7fffff0000（512GB），
           # 但 preloader 映射表与 virtual.c 的 no-preloader 兜底仍是 0x7ffffe000000（=128TB），
           # 在 39-bit VA 设备上 mmap 必然失败 -> "install_bpf ... low addresses" + "map_fixed_area out of memory 0x7fff..."
-          if [ -f loader/preloader.c ] && [ -f dlls/ntdll/unix/virtual.c ]; then
+          if [ -f /tmp/wine-termux/.skip39bit ]; then
+            warning "SKIP39BIT: 跳过高地址区适配（对照构建）"
+          elif [ -f loader/preloader.c ] && [ -f dlls/ntdll/unix/virtual.c ]; then
             _hi_files=$(grep -rl '0x7ffffe000000' --include='*.c' --include='*.h' . 2>/dev/null || true)
             for _f in $_hi_files; do
               msg2 "39-bit VA: 高区下移 0x7ffffe000000 -> 0x7ffe000000 in ${_f}"
@@ -393,6 +419,16 @@ jobs:
 
           echo "===== Hook check ====="
           grep -n "_termux_path_fix" "$NMBS" || { echo "❌ Hook injection failed"; exit 1; }
+
+          # ---- 39-bit 适配开关（workflow_dispatch 输入 skip_39bit）----
+          if [ "${{ github.event.inputs.skip_39bit }}" = "true" ]; then
+            sudo touch /tmp/archlinux/tmp/wine-termux/.skip39bit 2>/dev/null || true
+            if [ -f /tmp/archlinux/tmp/wine-termux/.skip39bit ]; then
+              echo "SKIP39BIT: 已创建标记 /tmp/wine-termux/.skip39bit -> 本次构建不带 39-bit 适配"
+            else
+              echo "SKIP39BIT: 警告：标记创建失败，将照常应用 39-bit 适配"
+            fi
+          fi
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
