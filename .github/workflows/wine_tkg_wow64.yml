@@ -311,7 +311,29 @@ jobs:
           # ===================== Termux 路径修复 hook 结束 =====================
 
           chmod +x ./non-makepkg-build.sh
-          yes | ./non-makepkg-build.sh || exit 1
+          # ---- TkG 的 userpatch 失败是硬 abort（如 LAA-unix-staging-wow64-<commit>.patch 只适配特定 staging 基线）。
+          #      改成：打不上的补丁自动剔除后重试，最多 9 次。_prepare 只是 clone+打补丁，重试很快。
+          _tkg_ok=0
+          for _try in 1 2 3 4 5 6 7 8 9; do
+            if yes | ./non-makepkg-build.sh > /tmp/tkg_build.out 2>&1; then
+              _tkg_ok=1
+              echo "✅ TkG build succeeded (attempt $_try)"
+              tail -5 /tmp/tkg_build.out
+              break
+            fi
+            echo "⚠️ TkG build failed (attempt $_try), 最后 20 行："
+            tail -20 /tmp/tkg_build.out
+            _bad=$(grep -oE 'Applying [^ ]+\.patch' /tmp/tkg_build.out | tail -1 | sed 's/^Applying //')
+            _f="/tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches/${_bad}"
+            if [ -n "${_bad}" ] && [ -f "${_f}" ]; then
+              echo "⚠️ 补丁 ${_bad} 打不上，移除后重试"
+              rm -f "${_f}"
+            else
+              echo "❌ 无法定位失败的 userpatch（_bad='${_bad}'），停止"
+              exit 1
+            fi
+          done
+          [ "${_tkg_ok}" = "1" ] || { echo "❌ 重试多次仍失败"; exit 1; }
           cd /tmp/output/
           tar -I 'xz -T$(nproc) -9' -cvf "/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz" */
           cd ~/.cache/
