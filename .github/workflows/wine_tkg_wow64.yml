@@ -373,12 +373,12 @@ jobs:
             fi
             for _f in $_seccomp_files; do
               msg2 "39-bit VA: seccomp 阈值下移 in ${_f}"
-              perl -pi -e 's/^#define NATIVE_SYSCALL_ADDRESS_START 0x[0-9a-fA-F]+/#define NATIVE_SYSCALL_ADDRESS_START 0x1000000000/' "$_f"
-              perl -pi -e 's/\(void \*\)0x600000000000/(void *)0x2000000000/g' "$_f"
+              perl -pi -e 's/(NATIVE_SYSCALL_ADDRESS_START\s+)0x[0-9a-fA-F]+/${1}0x1000000000/' "$_f"
+              perl -pi -e 's/0x600000000000/0x2000000000/g if /test_syscall/' "$_f"
             done
             if [ -n "$_seccomp_files" ]; then
-              _sc=$(grep -c 'NATIVE_SYSCALL_ADDRESS_START 0x1000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
-              _old=$(grep -c 'NATIVE_SYSCALL_ADDRESS_START 0x700000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+              _sc=$(grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x1000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+              _old=$(grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x(700000000000|600000000000)' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
               msg2 "39-bit VA seccomp check: new=${_sc} old=${_old}"
               if [ "${_sc}" = "0" ] || [ "${_old}" != "0" ]; then
                 echo "!!! FAIL: seccomp 阈值未完成 39-bit 适配 (new=${_sc} old=${_old})"
