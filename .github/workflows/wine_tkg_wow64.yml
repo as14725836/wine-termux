@@ -330,17 +330,29 @@ jobs:
             _fam="${_bad%-*.patch}"          # 去掉 -<commit>.patch，得到家族名
             echo "⚠️ 失败补丁: ${_bad} (家族: ${_fam})"
             _hit=0
-            # 用 find 全盘定位（TkG 的 userpatch 目录位置随版本变化，不能写死）
+            # 注意：chroot 内 /tmp 常是独立挂载，`find / -xdev` 会漏掉它，
+            #       所以显式扫多个根目录（TkG 的 userpatch 会在 /tmp 下）。
             for _pat in "${_bad}" "${_fam}"; do
               [ -n "${_pat}" ] || continue
-              while IFS= read -r _x; do
-                [ -n "${_x}" ] || continue
-                echo "   rm ${_x}"
-                rm -f "${_x}" && _hit=1
-              done < <(find / -xdev -name "${_pat}*" -type f -not -path '/proc/*' -not -path '/sys/*' 2>/dev/null | head -10)
+              for _root in /tmp /root /home /var/tmp /opt /usr/src /build /srv; do
+                [ -d "${_root}" ] || continue
+                while IFS= read -r _x; do
+                  [ -n "${_x}" ] || continue
+                  echo "   rm ${_x}"
+                  rm -f "${_x}" && _hit=1
+                done < <(find "${_root}" -name "${_pat}*" -type f 2>/dev/null | head -10)
+              done
             done
             if [ "${_hit}" = "0" ]; then
-              echo "❌ 找不到补丁文件，停止"
+              echo "❌ 找不到补丁文件；打印诊断："
+              echo "--- *userpatch* 目录下的所有 .patch ---"
+              find /tmp /root /opt -name '*.patch' -path '*userpatch*' 2>/dev/null | head -40
+              echo "--- TkG userpatches 目录 ---"
+              ls -la /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches 2>/dev/null | head -30
+              echo "--- 挂载情况（看 /tmp 是否独立挂载）---"
+              mount 2>/dev/null | grep -E ' / | /tmp ' | head -5
+              echo "--- 日志里出现的 *.patch 名字 ---"
+              grep -aoE '[A-Za-z0-9_.+-]+\\.patch' /tmp/tkg_build.out | sort -u | head -30
               exit 1
             fi
             echo "⚠️ 已移除打不上的补丁，重试"
