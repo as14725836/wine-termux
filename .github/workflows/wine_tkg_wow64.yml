@@ -377,8 +377,9 @@ jobs:
               perl -pi -e 's/0x600000000000/0x2000000000/g if /test_syscall/' "$_f"
             done
             if [ -n "$_seccomp_files" ]; then
-              _sc=$(grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x1000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
-              _old=$(grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x(700000000000|600000000000)' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+              _sc=$(cat $_seccomp_files 2>/dev/null | grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x1000000000' || true)
+              _old=$(cat $_seccomp_files 2>/dev/null | grep -cE 'NATIVE_SYSCALL_ADDRESS_START[[:space:]]+0x(700000000000|600000000000)' || true)
+              msg2 "39-bit VA seccomp 明细:"; grep -nH 'NATIVE_SYSCALL_ADDRESS_START' $_seccomp_files 2>/dev/null | head -6 || true
               msg2 "39-bit VA seccomp check: new=${_sc} old=${_old}"
               if [ "${_sc}" = "0" ] || [ "${_old}" != "0" ]; then
                 echo "!!! FAIL: seccomp 阈值未完成 39-bit 适配 (new=${_sc} old=${_old})"
