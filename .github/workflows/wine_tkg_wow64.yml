@@ -288,6 +288,36 @@ jobs:
             msg2 "self-check mfplat: $(grep -c resolver_create_default_handler dlls/mfplat/main.c 2>/dev/null || echo 0)"
             # ---- user patches end ----
 
+            # ---- mfplat CLSID 兜底（wine-9.4 + TkG staging 混用）----
+            # 现象（run #47 真实报错）：
+            #   ../wine-git/dlls/mfplat/main.c:6299: error:
+            #     'CLSID_MPEG4ByteStreamHandlerPlugin' undeclared
+            # 原因：TkG staging 的 mfplat 改动用到了该 CLSID，但该版本的
+            #       include/wine/mfinternal.idl 里没有这份 DEFINE_GUID 声明。
+            # 处理：给 main.c 注入一个本地静态 GUID 并把引用改名（不依赖头文件，
+            #       也不会和已有声明冲突）。
+            if [ -f "dlls/mfplat/main.c" ] && grep -q '&CLSID_MPEG4ByteStreamHandlerPlugin' dlls/mfplat/main.c; then
+              if grep -q '_wine_ci_mpeg4_bsh_clsid = {' dlls/mfplat/main.c; then
+                msg2 "mfplat CLSID 兜底：已注入，跳过"
+              else
+                msg2 "mfplat CLSID 兜底：注入本地 GUID 定义"
+                if grep -q '^#include "mfplat_private.h"$' dlls/mfplat/main.c; then
+                  sed -i 's|^#include "mfplat_private.h"$|#include "mfplat_private.h"\n\nstatic const GUID _wine_ci_mpeg4_bsh_clsid = {0x271c3902, 0x6095, 0x4c45, {0xa2, 0x2f, 0x20, 0x09, 0x18, 0x16, 0xee, 0x9e}};|' dlls/mfplat/main.c
+                elif grep -q '^#include "initguid.h"$' dlls/mfplat/main.c; then
+                  sed -i 's|^#include "initguid.h"$|#include "initguid.h"\n\nstatic const GUID _wine_ci_mpeg4_bsh_clsid = {0x271c3902, 0x6095, 0x4c45, {0xa2, 0x2f, 0x20, 0x09, 0x18, 0x16, 0xee, 0x9e}};|' dlls/mfplat/main.c
+                fi
+                if grep -q '_wine_ci_mpeg4_bsh_clsid = {' dlls/mfplat/main.c; then
+                  sed -i 's|&CLSID_MPEG4ByteStreamHandlerPlugin|\&_wine_ci_mpeg4_bsh_clsid|g' dlls/mfplat/main.c
+                  msg2 "mfplat CLSID 兜底：引用已改名（$(grep -c '_wine_ci_mpeg4_bsh_clsid' dlls/mfplat/main.c) 处命中）"
+                else
+                  warning "mfplat CLSID 兜底：未能插入定义，跳过改名（避免引入未定义符号）"
+                fi
+              fi
+            else
+              msg2 "mfplat CLSID 兜底：无需处理"
+            fi
+            # ---- mfplat CLSID 兜底 end ----
+
             popd &>/dev/null
             msg2 "Termux path fix done"
           }
@@ -318,17 +348,32 @@ jobs:
             if yes | ./non-makepkg-build.sh > /tmp/tkg_build.out 2>&1; then
               _tkg_ok=1
               echo "✅ TkG build succeeded (attempt $_try)"
-              tail -5 /tmp/tkg_build.out
+              tail -5 /tmp/tkg_build.out || true
               break
             fi
             echo "⚠️ TkG build failed (attempt $_try), 最后 20 行："
-            tail -20 /tmp/tkg_build.out
-            _bad=$(grep -oE 'Applying [^ ]+\.patch' /tmp/tkg_build.out | tail -1 | sed 's/^Applying //')
+            tail -20 /tmp/tkg_build.out || true
+            # ---- 只对「补丁打不上」做剔除 ----
+            # 编译错误绝不能删补丁：上一轮就是这么把核心 wine-tkg-staging 补丁删掉的
+            if ! grep -q 'Patch application has failed' /tmp/tkg_build.out; then
+              echo "❌ 本次不是补丁问题（编译或其他错误），不做任何补丁剔除"
+              grep -aE 'error:|Error 1|undefined|undeclared' /tmp/tkg_build.out | sed -n '1,15p' || true
+              exit 1
+            fi
+            _patline=$(grep -an 'Patch application has failed' /tmp/tkg_build.out | sed -n '1p' | cut -d: -f1)
+            _bad=$(sed -n "1,$((_patline-1))p" /tmp/tkg_build.out | grep -oE 'Applying [^ ]+\.patch' | tail -1 | sed 's/^Applying //')
             if [ -z "${_bad}" ]; then
-              _bad=$(grep -oE '[A-Za-z0-9_.+-]+\.patch' /tmp/tkg_build.out | tail -1)
+              _bad=$(grep -aoE '[A-Za-z0-9_.+-]+\.patch' /tmp/tkg_build.out | tail -1)
             fi
             _fam="${_bad%-*.patch}"          # 去掉 -<commit>.patch，得到家族名
-            echo "⚠️ 失败补丁: ${_bad} (家族: ${_fam})"
+            echo "⚠️ 补丁打不上: ${_bad} (家族: ${_fam})"
+            # ---- 白名单：只剔除已知对版本基线敏感的补丁，核心补丁一律不删 ----
+            case "${_fam}" in
+              LAA-unix-staging-wow64) ;;
+              *)
+                echo "❌ 失败补丁家族 ${_fam} 不在白名单，拒绝删除（避免破坏构建）"
+                exit 1 ;;
+            esac
             _hit=0
             # chroot 里没有 /dev/fd，不能用 < <(...) 进程替换；改成写临时文件再读
             _list=/tmp/_patch_hits.txt
@@ -337,7 +382,7 @@ jobs:
               [ -n "${_pat}" ] || continue
               for _root in /tmp /root /home /var/tmp /opt /usr/src /build /srv; do
                 [ -d "${_root}" ] || continue
-                find "${_root}" -name "${_pat}*" -type f 2>/dev/null | head -10 >> "${_list}"
+                find "${_root}" -name "${_pat}*" -type f 2>/dev/null | sed -n '1,10p' >> "${_list}"
               done
             done
             sort -u "${_list}" -o "${_list}" 2>/dev/null || true
@@ -351,15 +396,15 @@ jobs:
             if [ "${_hit}" = "0" ]; then
               echo "❌ 找不到补丁文件；打印诊断："
               echo "--- *userpatch* 目录下的 .patch ---"
-              find /tmp /root /opt -name '*.patch' -path '*userpatch*' 2>/dev/null | head -40
+              find /tmp /root /opt -name '*.patch' -path '*userpatch*' 2>/dev/null | sed -n '1,40p'
               echo "--- TkG userpatches 目录 ---"
-              ls -la /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches 2>/dev/null | head -30
+              ls -la /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches 2>/dev/null | sed -n '1,30p'
               echo "--- TkG 顶层 ---"
-              ls -la /tmp/wine-tkg-git/wine-tkg-git 2>/dev/null | head -30
+              ls -la /tmp/wine-tkg-git/wine-tkg-git 2>/dev/null | sed -n '1,30p'
               echo "--- 挂载情况 ---"
-              mount 2>/dev/null | head -20
+              mount 2>/dev/null | sed -n '1,20p'
               echo "--- 日志里出现过的 *.patch ---"
-              grep -aoE '[A-Za-z0-9_.+-]+\\.patch' /tmp/tkg_build.out | sort -u | head -30
+              grep -aoE '[A-Za-z0-9_.+-]+\\.patch' /tmp/tkg_build.out | sort -u | sed -n '1,30p'
               exit 1
             fi
             echo "⚠️ 已移除打不上的补丁，重试"
