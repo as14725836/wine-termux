@@ -259,7 +259,8 @@ jobs:
             for _up in 0060-quartz-implement-colour-filter.patch \
                        0061-qasf-deliver-compressed-asf-streams.patch \
                        termux-dns-fix.patch \
-                       wine-virtual-memory.patch; do
+                       wine-virtual-memory.patch \
+                       wine-virtual-memory-39bit-hiarea.patch; do
               local _up_file="/tmp/wine-termux/$_up"
               local _up_url="https://raw.githubusercontent.com/as14725836/wine-termux/main/$_up"
               if [ ! -f "$_up_file" ]; then
@@ -304,6 +305,32 @@ jobs:
               warning "wine-virtual-memory: 找不到目标文件，跳过"
             fi
             # ---- wine-virtual-memory 结束 ----
+          # ---- 39-bit VA 完整化：Wine 的“高地址区”也必须落在 39-bit 以内 ----
+          # wine-virtual-memory.patch 只把三个 limit 降到 0x7fffff0000（512GB），
+          # 但 preloader 映射表与 virtual.c 的 no-preloader 兜底仍是 0x7ffffe000000（=128TB），
+          # 在 39-bit VA 设备上 mmap 必然失败 -> "install_bpf ... low addresses" + "map_fixed_area out of memory 0x7fff..."
+          if [ -f loader/preloader.c ] && [ -f dlls/ntdll/unix/virtual.c ]; then
+            _hi_files=$(grep -rl '0x7ffffe000000' --include='*.c' --include='*.h' . 2>/dev/null || true)
+            for _f in $_hi_files; do
+              msg2 "39-bit VA: 高区下移 0x7ffffe000000 -> 0x7ffe000000 in ${_f}"
+              sed -i 's/0x7ffffe000000/0x7ffe000000/g' "$_f"
+            done
+            _old_files=$(grep -rl '0x7fffffff0000' --include='*.c' --include='*.h' . 2>/dev/null || true)
+            for _f in $_old_files; do
+              msg2 "39-bit VA: 旧上限残留 -> 0x7fffff0000 in ${_f}"
+              sed -i 's/0x7fffffff0000/0x7fffff0000/g' "$_f"
+            done
+            HIA=$(grep -c '0x7ffe000000' loader/preloader.c || true)
+            VMA=$(grep -c '0x7ffe000000' dlls/ntdll/unix/virtual.c || true)
+            LEFT=$( { grep -rn '0x7ffffe000000\|0x7fffffff0000' --include='*.c' --include='*.h' . 2>/dev/null || true; } | wc -l )
+            msg2 "39-bit VA check: preloader=${HIA} virtual=${VMA} leftover=${LEFT}"
+            if [ "${HIA}" = "0" ] || [ "${VMA}" = "0" ] || [ "${LEFT}" != "0" ]; then
+              echo "!!! FAIL: 39-bit VA 高区适配未生效 (preloader=${HIA} virtual=${VMA} leftover=${LEFT})"
+              exit 1
+            fi
+          else
+            warning "39-bit VA: 找不到 preloader.c / virtual.c，跳过"
+          fi
 
             # --- .rej hard check ---
             if find . -name '*.rej' | head -5 | grep -q .; then
