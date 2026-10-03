@@ -358,6 +358,37 @@ jobs:
             warning "39-bit VA: 找不到 preloader.c / virtual.c，跳过"
           fi
 
+            # ---- 39-bit VA：syscall-emulation（seccomp）阈值也在 39-bit 之外 ----
+            # TkG/staging 的 install_bpf()（dlls/ntdll/unix/signal_*.c）用
+            #   #define NATIVE_SYSCALL_ADDRESS_START 0x700000000000   (112 TB)
+            #   test_syscall = mmap((void *)0x600000000000, ...)      (96 TB)
+            # 来判断“原生库在高地址、PE 代码在低地址”。39-bit 设备上这两个值永远达不到，
+            # 于是 seccomp 一辈子装不上，32 位 PE 代码的裸 syscall 就无人接管。
+            # 这里把阈值降到 39-bit 空间内（64GB / 128GB），语义保持一致。
+            if [ -f /tmp/wine-termux/.skip39bit ]; then
+              warning "SKIP39BIT: 跳过 seccomp 阈值适配（对照构建）"
+              _seccomp_files=""
+            else
+              _seccomp_files=$(grep -rl 'NATIVE_SYSCALL_ADDRESS_START' --include='*.c' . 2>/dev/null || true)
+            fi
+            for _f in $_seccomp_files; do
+              msg2 "39-bit VA: seccomp 阈值下移 in ${_f}"
+              perl -pi -e 's/^#define NATIVE_SYSCALL_ADDRESS_START 0x[0-9a-fA-F]+/#define NATIVE_SYSCALL_ADDRESS_START 0x1000000000/' "$_f"
+              perl -pi -e 's/\(void \*\)0x600000000000/(void *)0x2000000000/g' "$_f"
+            done
+            if [ -n "$_seccomp_files" ]; then
+              _sc=$(grep -c 'NATIVE_SYSCALL_ADDRESS_START 0x1000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+              _old=$(grep -c 'NATIVE_SYSCALL_ADDRESS_START 0x700000000000' $_seccomp_files 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+              msg2 "39-bit VA seccomp check: new=${_sc} old=${_old}"
+              if [ "${_sc}" = "0" ] || [ "${_old}" != "0" ]; then
+                echo "!!! FAIL: seccomp 阈值未完成 39-bit 适配 (new=${_sc} old=${_old})"
+                exit 1
+              fi
+            else
+              warning "39-bit VA: 未找到 install_bpf 阈值（该树无 staging syscall-emulation），跳过"
+            fi
+            # ---- syscall-emulation 39-bit 结束 ----
+
             # --- .rej hard check ---
             if find . -name '*.rej' | head -5 | grep -q .; then
               warning "!!! .rej files detected:"
