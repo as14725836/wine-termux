@@ -1,0 +1,10 @@
+--- dlls/qasf/tests/asfreader.c
++++ dlls/qasf/tests/asfreader.c
+@@ -1297,6 +1475,7 @@
+     test_filesourcefilter();
+     test_filter_state();
+     test_seeking();
++    test_compressed_output();
+     test_threading(FALSE);
+     test_threading(TRUE);
+ 

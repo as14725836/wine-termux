@@ -1,0 +1,10 @@
+--- dlls/quartz/tests/Makefile.in
++++ dlls/quartz/tests/Makefile.in
+@@ -6,6 +6,7 @@
+ 	avidec.c \
+ 	avisplit.c \
+ 	colorconv.c \
++	colour.c \
+ 	dsoundrender.c \
+ 	filesource.c \
+ 	filtergraph.c \
