@@ -281,7 +281,8 @@ jobs:
                        0061-qasf-deliver-compressed-asf-streams.patch \
                        termux-dns-fix.patch \
                        wine-virtual-memory.patch \
-                       wine-virtual-memory-39bit-hiarea.patch; do
+                       wine-virtual-memory-39bit-hiarea.patch \
+                       wine-box64-compat.patch; do
               case "$_up" in
                 wine-virtual-memory*)
                   if [ -f /tmp/wine-termux/.skip39bit ]; then
@@ -365,6 +366,32 @@ jobs:
             warning "39-bit VA: 找不到 preloader.c / virtual.c，跳过"
           fi
 
+            # ---- wine-box64-compat.patch 校验（box64/模拟器下的地址空间收敛）----
+            # 目标：dlls/ntdll/unix/virtual.c 里新增
+            #   wine_emulator_detected() / wine_emulator_addr_space_limit()
+            # 并在 virtual_init() 中把四个 limit 收敛到模拟器安全窗口
+            if [ -f dlls/ntdll/unix/virtual.c ]; then
+              EMD=$(grep -c 'wine_emulator_detected' dlls/ntdll/unix/virtual.c || true)
+              EMF=$(grep -c 'wine_emulator_addr_space_limit' dlls/ntdll/unix/virtual.c || true)
+              EMC=$(grep -c 'box64/emu compat' dlls/ntdll/unix/virtual.c || true)
+              msg2 "box64-compat check: detect=${EMD} limit_fn=${EMF} clamp=${EMC}"
+              if [ "${EMD}" = "0" ] || [ "${EMF}" = "0" ] || [ "${EMC}" = "0" ]; then
+                echo "!!! FAIL: wine-box64-compat 未生效 (detect=${EMD} limit_fn=${EMF} clamp=${EMC})"
+                echo "!!!       兜底：直接注入最小实现"
+                perl -0pi -e 's{(static void mmap_init\( const struct preload_info \*preload_info \)\n)}{/* wine-box64-compat (fallback) */\nstatic int wine_emulator_detected(void)\n{\n    static int c = -1;\n    if (c >= 0) return c;\n    c = (getenv( "WINE_EMULATOR" ) && getenv( "WINE_EMULATOR" )[0] == 0x30 && !getenv( "WINE_EMULATOR" )[1]) ? 0 : 1;\n    if (getenv( "BOX64_VERSION" ) || getenv( "BOX64_LD_LIBRARY_PATH" ) || getenv( "QEMU_LD_PREFIX" )) c = 1;\n    return c;\n}\nstatic void *wine_emulator_addr_space_limit(void)\n{\n    const char *e = getenv( "WINE_EMULATOR_LIMIT" );\n    return (e && *e) ? (void *)(ULONG_PTR)strtoull( e, NULL, 0 ) : (void *)0x7fffff0000;\n}\n$1}' dlls/ntdll/unix/virtual.c
+                perl -0pi -e 's{(    host_addr_space_limit = address_space_limit;\n#endif\n)}{$1    if (wine_emulator_detected())\n    {\n        void *limit = wine_emulator_addr_space_limit();\n        address_space_limit = limit;\n        user_space_limit    = limit;\n        working_set_limit   = limit;\n        host_addr_space_limit = limit;\n        WARN( "box64/emu compat: address space limited to %p\\n", limit );\n    }\n}' dlls/ntdll/unix/virtual.c
+                EMD=$(grep -c 'wine_emulator_detected' dlls/ntdll/unix/virtual.c || true)
+                EMF=$(grep -c 'wine_emulator_addr_space_limit' dlls/ntdll/unix/virtual.c || true)
+                EMC=$(grep -c 'box64/emu compat' dlls/ntdll/unix/virtual.c || true)
+                msg2 "box64-compat fallback 后: detect=${EMD} limit_fn=${EMF} clamp=${EMC}"
+                if [ "${EMD}" = "0" ] || [ "${EMF}" = "0" ] || [ "${EMC}" = "0" ]; then
+                  echo "!!! FAIL: wine-box64-compat 兜底后仍未生效"
+                  exit 1
+                fi
+              fi
+            else
+              warning "wine-box64-compat: 找不到 virtual.c，跳过"
+            fi
             # ---- 39-bit VA：syscall-emulation（seccomp）阈值也在 39-bit 之外 ----
             # TkG/staging 的 install_bpf()（dlls/ntdll/unix/signal_*.c）用
             #   #define NATIVE_SYSCALL_ADDRESS_START 0x700000000000   (112 TB)
