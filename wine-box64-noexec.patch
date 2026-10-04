@@ -1,0 +1,33 @@
+======================================================================
+ wine-box64-noexec.patch
+ ------------------------------------------------------------------
+ 适用: wine-9.x / 10.x  路径: patch -p1
+ 场景: 游戏/EXE/DLL 放在 noexec 分区（如 Android /sdcard），wine 对只读可执行
+       映射（MAP_SHARED + PROT_EXEC）会被内核拒绝：
+         err:virtual:map_file_into_view failed to set PROT_EXEC on file map, noexec filesystem?
+         err:virtual:virtual_map_section mapping ... failed
+ 修复: 仅当「只读映射 + 处于模拟器环境(box64等)」时，不再硬失败，改用 Wine 自带
+       的 read() 兜底（匿名内存 + pread）。模拟器下代码是翻译执行的，不需要该
+       映射真的可执行，因此语义安全。
+ 依赖: wine-box64-compat.patch 提供的 wine_emulator_detected()
+ 验证: 干净 wine-9.4 / 已套 39-bit 的 9.4 / 干净 wine-9.21 / 已套 39-bit 的 9.21
+       四种源码上 patch -p1 --dry-run 均 rc=0
+======================================================================
+--- a/dlls/ntdll/unix/virtual.c	2024-03-08 22:35:07.000000000 +0000
++++ b/dlls/ntdll/unix/virtual.c	2026-10-04 03:30:59.371308169 +0000
+@@ -2106,6 +2106,15 @@
+             if (flags & MAP_SHARED)
+             {
+                 if (prot & PROT_EXEC) ERR( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
++                if ((prot & PROT_EXEC) && !(vprot & VPROT_WRITE) && wine_emulator_detected())
++                {
++                    /* box64/emu compat: under an x86 emulator this mapping is only
++                     * data (the code is translated, not executed from it), so a
++                     * read-only executable mapping on a noexec filesystem can be
++                     * satisfied by the read() fallback below instead of failing. */
++                    WARN( "box64/emu compat: noexec exec map relaxed, falling back to read\n" );
++                    break;
++                }
+                 return STATUS_ACCESS_DENIED;
+             }
+             if (prot & PROT_EXEC) WARN( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
