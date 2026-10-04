@@ -310,7 +310,8 @@ jobs:
                        termux-dns-fix.patch \
                        wine-virtual-memory.patch \
                        wine-virtual-memory-39bit-hiarea.patch \
-                       wine-box64-compat.patch; do
+                       wine-box64-compat.patch \
+                       wine-box64-noexec.patch; do
               case "$_up" in
                 wine-virtual-memory*)
                   if [ -f /tmp/wine-termux/.skip39bit ]; then
@@ -399,9 +400,10 @@ jobs:
               EMD=$(grep -c 'wine_emulator_detected' dlls/ntdll/unix/virtual.c || true)
               EMF=$(grep -c 'wine_emulator_addr_space_limit' dlls/ntdll/unix/virtual.c || true)
               EMC=$(grep -c 'box64/emu compat' dlls/ntdll/unix/virtual.c || true)
-              msg2 "box64-compat check: detect=${EMD} limit_fn=${EMF} clamp=${EMC}"
-              if [ "${EMD}" = "0" ] || [ "${EMF}" = "0" ] || [ "${EMC}" = "0" ]; then
-                echo "!!! FAIL: wine-box64-compat 未生效 (detect=${EMD} limit_fn=${EMF} clamp=${EMC})"
+              EMN=$(grep -c 'noexec exec map relaxed' dlls/ntdll/unix/virtual.c || true)
+              msg2 "box64-compat check: detect=${EMD} limit_fn=${EMF} clamp=${EMC} noexec=${EMN}"
+              if [ "${EMD}" = "0" ] || [ "${EMF}" = "0" ] || [ "${EMC}" = "0" ] || [ "${EMN}" = "0" ]; then
+                echo "!!! FAIL: wine-box64-compat/noexec 未生效 (detect=${EMD} limit_fn=${EMF} clamp=${EMC} noexec=${EMN})"
                 exit 1
               fi
             fi
