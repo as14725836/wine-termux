@@ -116,14 +116,42 @@ jobs:
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
           fi
+          # ---- 变体标记：自动反映构建开关，避免不同配置生成同名包 ----
+          variant=""
+          if [[ "${{ github.event.inputs.no_staging }}" == "true" ]]; then
+            variant="nostg"
+          fi
+          if [[ "${{ github.event.inputs.skip_39bit }}" == "true" ]]; then
+            variant="${variant:+${variant}-}no39bit"
+          fi
+          if [[ "${{ github.event.inputs.no_staging }}" == "true" ]]; then
+            staging_state="off"
+          else
+            staging_state="on"
+          fi
+          if [[ "${{ github.event.inputs.skip_39bit }}" == "true" ]]; then
+            patch39_state="skipped"
+          else
+            patch39_state="applied"
+          fi
+          variant_desc="TkG Staging GE"
+          if [ -n "$variant" ]; then
+            variant_desc="TkG Staging GE [${variant} staging=${staging_state} 39bit=${patch39_state}]"
+          fi
           pkg_suffix="${{ github.event.inputs.pkg_suffix }}"
           if [ -n "$pkg_suffix" ]; then
             pkg_name="${pkg_name}-${pkg_suffix}"
-            echo "pkg_suffix=$pkg_suffix -> PKG_NAME=$pkg_name"
+          elif [ -n "$variant" ]; then
+            pkg_name="${pkg_name}-${variant}"
           fi
+          echo "PKG_NAME=$pkg_name (variant=${variant:-default})"
           echo "wine_tag=$wine_tag" >> "$GITHUB_OUTPUT"
           echo "wine_ver=$wine_ver" >> "$GITHUB_OUTPUT"
           echo "PKG_NAME=$pkg_name" >> "$GITHUB_OUTPUT"
+          echo "VARIANT=${variant:-default}" >> "$GITHUB_OUTPUT"
+          echo "VARIANT_DESC=$variant_desc" >> "$GITHUB_OUTPUT"
+          echo "STAGING=${staging_state}" >> "$GITHUB_OUTPUT"
+          echo "PATCH39=${patch39_state}" >> "$GITHUB_OUTPUT"
           echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
@@ -604,6 +632,26 @@ jobs:
           sudo chmod 644 wine-tkg-config.txt
           sudo rm -rf .git
           cd "$src_dir"
+          # ---- 写自描述构建信息（源码分支根目录，便于区分不同配置的包）----
+          {
+            echo "wine tag       : ${{ steps.wine_tag.outputs.wine_tag }}"
+            echo "package name   : ${{ steps.wine_tag.outputs.PKG_NAME }}"
+            echo "variant        : ${{ steps.wine_tag.outputs.VARIANT }}"
+            echo "staging        : ${{ steps.wine_tag.outputs.STAGING }}"
+            echo "39-bit patch   : ${{ steps.wine_tag.outputs.PATCH39 }}"
+            echo "enable_mf      : ${{ steps.wine-mirror.outputs.enable_mf || 'false' }}"
+            echo "enable_esync   : ${{ steps.wine_tag.outputs.enable_esync }}"
+            echo "workflow sha   : ${{ github.sha }}"
+            echo "run            : #${{ github.run_number }} (id ${{ github.run_id }})"
+            echo "built at (UTC) : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "-- 源码树校验 --"
+            echo "virtual.c 0x7fffff0000           : $(grep -c 0x7fffff0000 dlls/ntdll/unix/virtual.c || true)"
+            echo "virtual.c 0x7ffe000000           : $(grep -c 0x7ffe000000 dlls/ntdll/unix/virtual.c || true)"
+            echo "virtual.c wine_emulator_detected : $(grep -c wine_emulator_detected dlls/ntdll/unix/virtual.c || true)"
+            echo "virtual.c box64/emu compat       : $(grep -c 'box64/emu compat' dlls/ntdll/unix/virtual.c || true)"
+            echo "seccomp NATIVE_SYSCALL_ADDRESS_START : $(grep -rh NATIVE_SYSCALL_ADDRESS_START dlls/ntdll/unix/ 2>/dev/null | head -1 | tr -s ' ')"
+          } > BUILD-INFO.txt
           git init
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -621,10 +669,25 @@ jobs:
         with:
           target_commitish: ${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}
           tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}
-          name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME == 'mf' && 'mf' || 'dxgi' }}) TkG Staging GE
+          name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME }}) ${{ steps.wine_tag.outputs.VARIANT_DESC }}
           body: |
             自动编译版本。
-            [源码](https://github.com/as14725836/wine-termux/tree/${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }})
+
+            | 项目 | 值 |
+            |---|---|
+            | wine tag | `${{ steps.wine_tag.outputs.wine_tag }}` |
+            | 包名 | `${{ steps.wine_tag.outputs.PKG_NAME }}` |
+            | 变体 | `${{ steps.wine_tag.outputs.VARIANT }}` |
+            | TkG staging | `${{ steps.wine_tag.outputs.STAGING }}` |
+            | 39-bit VA 适配 | `${{ steps.wine_tag.outputs.PATCH39 }}` |
+            | Proton MF | `${{ steps.wine-mirror.outputs.enable_mf || 'false' }}` |
+            | workflow | `${{ github.sha }}` |
+            | run | #${{ github.run_number }} |
+
+            box64 兼容补丁 / 39-bit / seccomp 阈值的**源码树实测值**见源码分支根目录的 `BUILD-INFO.txt`。
+
+            [源码分支](https://github.com/as14725836/wine-termux/tree/${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}) ·
+            [本次构建日志](https://github.com/as14725836/wine-termux/actions/runs/${{ github.run_id }})
           files: /tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz
           draft: false
           prerelease: false
