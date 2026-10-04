@@ -1,0 +1,110 @@
+======================================================================
+ wine-box64-compat.patch
+ ------------------------------------------------------------------
+ 适用: wine-9.x / 10.x (wow64)  路径: patch -p1
+ 作用: 让 wine 感知“正在 x86 模拟器（box64/box86/FEX/qemu）下运行”，
+       并把地址空间收敛到模拟器友好的窗口，避免 wine 的宿主地址假设
+       （47-bit/128TB 高地址区、seccomp 原生地址判定）与模拟器冲突。
+
+ 新增1: wine_emulator_detected()     —— 识别模拟器 + 环境变量强制/关闭
+ 新增2: wine_emulator_addr_space_limit() —— 39-bit 安全上限（512GB-64KB）
+ 修改: virtual_init()  —— 模拟器下收敛 address/user/working_set/host 四个 limit
+
+ 环境变量:
+   WINE_EMULATOR=<name>      强制开启（=0 强制关闭，逃生开关）
+   WINE_EMULATOR_LIMIT=<hex> 自定义地址空间上限
+
+ 验证: 干净 wine-9.4 源码 rc=0；已套 39-bit 补丁的源码同样 rc=0。
+======================================================================
+--- a/dlls/ntdll/unix/virtual.c	2024-03-08 22:35:07.000000000 +0000
++++ b/dlls/ntdll/unix/virtual.c	2026-10-04 02:03:24.663310174 +0000
+@@ -501,6 +501,72 @@
+ }
+ 
+ 
++/***********************************************************************
++ *           wine_emulator_detected
++ *
++ * Detect whether wine runs under an x86 emulator (box64 / box86 / FEX / qemu).
++ * Such emulators translate the guest code and execute it inside their own
++ * (host) address space, so every wine assumption based on host addresses
++ * becomes invalid:
++ *   - the 47-bit / 128TB high address area layout used by the preloader
++ *   - seccomp decisions of the form "native libs live in high addresses"
++ *   - the 64KB alignment the emulator imposes on wine's own mappings
++ * This helper is the single place to query that state.
++ *   WINE_EMULATOR=<name>     force on
++ *   WINE_EMULATOR=0          force off (escape hatch)
++ */
++static int wine_emulator_detected(void)
++{
++    static int cached = -1;
++    const char *env;
++
++    if (cached >= 0) return cached;
++    cached = 0;
++
++    if ((env = getenv( "WINE_EMULATOR" )) && *env)
++    {
++        cached = (env[0] == '0' && !env[1]) ? 0 : 1;
++        return cached;
++    }
++    if (getenv( "BOX64_VERSION" ) || getenv( "BOX64_LD_LIBRARY_PATH" ) || getenv( "BOX64_LOG" ) ||
++        getenv( "BOX86_VERSION" ) || getenv( "BOX86_LD_LIBRARY_PATH" ) ||
++        getenv( "FEX_TSOENABLED" ) || getenv( "FEX_ROOTFS" ) || getenv( "FEX_APP_CONFIG" ) ||
++        getenv( "QEMU_LD_PREFIX" ) || getenv( "QEMU_CPU" ))
++        cached = 1;
++#ifdef __linux__
++    if (!cached)
++    {
++        /* box64/box86/FEX keep the guest binary mapped in their own process,
++         * so /proc/self/exe points at the emulator itself. */
++        char buf[256];
++        ssize_t len = readlink( "/proc/self/exe", buf, sizeof(buf) - 1 );
++        if (len > 0)
++        {
++            buf[len] = 0;
++            if (strstr( buf, "box64" ) || strstr( buf, "box86" ) ||
++                strstr( buf, "FEXInterpreter" ) || strstr( buf, "qemu-" ))
++                cached = 1;
++        }
++    }
++#endif
++    return cached;
++}
++
++/***********************************************************************
++ *           wine_emulator_addr_space_limit
++ *
++ * Upper bound of the address space to use under an emulator. Defaults to the
++ * same 39-bit safe window used by the 39-bit layout patches (512GB - 64KB),
++ * overridable with WINE_EMULATOR_LIMIT=<hex|dec>.
++ */
++static void *wine_emulator_addr_space_limit(void)
++{
++    const char *env = getenv( "WINE_EMULATOR_LIMIT" );
++
++    if (env && *env) return (void *)(ULONG_PTR)strtoull( env, NULL, 0 );
++    return (void *)0x7fffff0000;
++}
++
+ static void mmap_init( const struct preload_info *preload_info )
+ {
+ #ifndef _WIN64
+@@ -3295,6 +3361,16 @@
+ #else
+     host_addr_space_limit = address_space_limit;
+ #endif
++    if (wine_emulator_detected())
++    {
++        void *limit = wine_emulator_addr_space_limit();
++
++        address_space_limit = limit;
++        user_space_limit    = limit;
++        working_set_limit   = limit;
++        host_addr_space_limit = limit;
++        WARN( "box64/emu compat: address space limited to %p\n", limit );
++    }
+ 
+     if (preload_info && *preload_info)
+         for (i = 0; (*preload_info)[i].size; i++)
