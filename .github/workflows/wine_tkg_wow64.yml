@@ -30,6 +30,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_staging:
+        description: "关闭 TkG staging（对照构建：对齐纯净 wine，用于定位 staging 补丁问题）"
+        required: false
+        type: boolean
+        default: false
       pkg_suffix:
         description: "产物后缀（如 no39bit），体现在 Release tag / 源码分支名，避免覆盖现有包"
         required: false
@@ -122,6 +127,8 @@ jobs:
           echo "enable_esync=${{ github.event.inputs.enable_esync || 'true' }}" >> "$GITHUB_OUTPUT"
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
+        env:
+          NO_STAGING: ${{ github.event.inputs.no_staging || 'false' }}
         run: |
           echo "Using Wine tag: ${{ steps.wine_tag.outputs.wine_tag }}"
           cat > ~/.gitconfig << EOF
