@@ -1,0 +1,17 @@
+wine tag       : wine-9.4
+package name   : dxgi
+variant        : default
+staging        : on
+39-bit patch   : applied
+enable_mf      : false
+enable_esync   : true
+workflow sha   : 674e65f3ecb7e3b8b897ca948d3c351c6cda9d34
+run            : #62 (id 37175156236)
+built at (UTC) : 2026-10-04T04:31:51Z
+
+-- 源码树校验 --
+virtual.c 0x7fffff0000           : 5
+virtual.c 0x7ffe000000           : 1
+virtual.c wine_emulator_detected : 4
+virtual.c box64/emu compat       : 3
+seccomp NATIVE_SYSCALL_ADDRESS_START : #define NATIVE_SYSCALL_ADDRESS_START 0x1000000000
