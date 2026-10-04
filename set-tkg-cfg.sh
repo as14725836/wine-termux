@@ -56,6 +56,11 @@ sed2 _win10_default true
 sed2 _community_patches_auto_update true
 sed2 _nomakepkg_prefix_path /tmp/output
 
+if [ "$NO_STAGING" = "true" ]; then
+  echo "NO_STAGING: 关闭 staging（对照构建：对齐纯净 wine）"
+  sed2 _use_staging false
+fi
+
 file_path2="$file_path/wine-tkg-profiles/advanced-customization.cfg"
 # -std=gnu17: GCC>=14 默认 C23，Wine 9.x 的 programs/winhlp32/macro.h 有成员叫 bool，会报
 #            "two or more data types in declaration specifiers"
