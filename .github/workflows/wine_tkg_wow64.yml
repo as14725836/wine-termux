@@ -400,8 +400,14 @@ jobs:
               EMD=$(grep -c 'wine_emulator_detected' dlls/ntdll/unix/virtual.c || true)
               EMF=$(grep -c 'wine_emulator_addr_space_limit' dlls/ntdll/unix/virtual.c || true)
               EMC=$(grep -c 'box64/emu compat' dlls/ntdll/unix/virtual.c || true)
-              EMN=$(grep -c 'noexec exec map relaxed' dlls/ntdll/unix/virtual.c || true)
-              msg2 "box64-compat check: detect=${EMD} limit_fn=${EMF} clamp=${EMC} noexec=${EMN}"
+              # noexec 放宽：老树靠 wine-box64-noexec.patch 注入 'noexec exec map relaxed' 文案；
+              # wine-11.18+ 上游已自带等价逻辑（map_file_into_view 里 EACCES/EPERM + 只读映射
+              # 直接 break 走 read() 兜底，另有 'noexec file system, falling back to read'），
+              # 此时旧补丁本身就打不上（hunk 已不存在），两者任一命中即可放行。
+              EMN1=$(grep -c 'noexec exec map relaxed' dlls/ntdll/unix/virtual.c || true)
+              EMN2=$(grep -c 'falling back to read\|fall back to read()' dlls/ntdll/unix/virtual.c || true)
+              EMN=$(( ${EMN1:-0} + ${EMN2:-0} ))
+              msg2 "box64-compat check: detect=${EMD} limit_fn=${EMF} clamp=${EMC} noexec=${EMN} (patch=${EMN1} upstream=${EMN2})"
               if [ "${EMD}" = "0" ] || [ "${EMF}" = "0" ] || [ "${EMC}" = "0" ] || [ "${EMN}" = "0" ]; then
                 echo "!!! FAIL: wine-box64-compat/noexec 未生效 (detect=${EMD} limit_fn=${EMF} clamp=${EMC} noexec=${EMN})"
                 exit 1
