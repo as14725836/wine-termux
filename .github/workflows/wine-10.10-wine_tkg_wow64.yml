@@ -729,12 +729,16 @@ jobs:
           EOF
 
           sudo chmod +x build-wine.sh
+          echo "== 放置 build-wine.sh 诊断：cwd=$(pwd) =="
+          ls -ld build-wine.sh archlinux archlinux/bin 2>&1 || true
+          ls -ld archlinux/bin/build-wine.sh 2>&1 || true
           sudo mkdir -p archlinux/bin
-          if [ -d archlinux/bin/build-wine.sh ]; then
-            echo "⚠️ archlinux/bin/build-wine.sh 是目录（历史遗留）→ 先移除再放文件"
-            sudo rm -rf archlinux/bin/build-wine.sh
+          sudo rm -rf archlinux/bin/build-wine.sh
+          if sudo cp -f build-wine.sh archlinux/bin/build-wine.sh; then
+            echo "OK: 已放置 archlinux/bin/build-wine.sh"
+          else
+            echo "FAIL: 放置 build-wine.sh 失败"; ls -l build-wine.sh archlinux/bin 2>&1 || true; exit 1
           fi
-          sudo mv -f build-wine.sh archlinux/bin/build-wine.sh
 
       - name: Restore ccache
         if: steps.need_build.outputs.new_release == 'true'
