@@ -518,6 +518,24 @@ jobs:
 
           EOF
 
+          # ---- runner 侧：注入 hook 到 TkG 脚本（NMBS/PREPARE_SH 此前只在 build-wine.sh 内定义，
+          #      在 runner 这个 shell 里是空的，导致 mv .new '' 失败）----
+          NMBS="$(find "$PWD/archlinux/tmp" /tmp/archlinux/tmp -maxdepth 4 -name non-makepkg-build.sh -type f 2>/dev/null | head -1)"
+          PREPARE_SH="$(find "$PWD/archlinux/tmp" /tmp/archlinux/tmp -maxdepth 6 -path '*wine-tkg-scripts/prepare.sh' -type f 2>/dev/null | head -1)"
+          TKG_DIR="$(dirname "${NMBS:-/dev/null}")"
+          echo "runner 侧定位: TKG_DIR=$TKG_DIR"
+          echo "runner 侧定位: NMBS=$NMBS"
+          echo "runner 侧定位: PREPARE_SH=$PREPARE_SH"
+          if [ -z "$NMBS" ] || [ ! -f "$NMBS" ]; then
+            echo "❌ runner 侧未找到 non-makepkg-build.sh，无法注入 hook"
+            find "$PWD/archlinux/tmp" -maxdepth 3 -type d 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          if [ -z "$PREPARE_SH" ] || [ ! -f "$PREPARE_SH" ]; then
+            echo "❌ runner 侧未找到 wine-tkg-scripts/prepare.sh"
+            exit 1
+          fi
+
           # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_termux_path_fix`
           awk '
             /^[[:space:]]*_prepare[[:space:]]*$/ && !done {
