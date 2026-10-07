@@ -166,6 +166,9 @@ jobs:
       - name: Clone project & setup rootfs
         if: steps.need_build.outputs.new_release == 'true'
         run: |
+          set -x
+          PS4='+L${LINENO}: '
+
           echo "Using Wine tag: ${{ steps.wine_tag.outputs.wine_tag }}"
 
           # ===================== 新增：显示提交选择 =====================
