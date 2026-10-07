@@ -729,7 +729,12 @@ jobs:
           EOF
 
           sudo chmod +x build-wine.sh
-          sudo mv build-wine.sh archlinux/bin/build-wine.sh
+          sudo mkdir -p archlinux/bin
+          if [ -d archlinux/bin/build-wine.sh ]; then
+            echo "⚠️ archlinux/bin/build-wine.sh 是目录（历史遗留）→ 先移除再放文件"
+            sudo rm -rf archlinux/bin/build-wine.sh
+          fi
+          sudo mv -f build-wine.sh archlinux/bin/build-wine.sh
 
       - name: Restore ccache
         if: steps.need_build.outputs.new_release == 'true'
