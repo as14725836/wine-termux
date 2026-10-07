@@ -767,7 +767,9 @@ jobs:
           sudo mkdir -p archlinux/bin
           sudo rm -rf archlinux/bin/build-wine.sh
           if sudo cp -f build-wine.sh archlinux/bin/build-wine.sh; then
-            echo "OK: 已放置 archlinux/bin/build-wine.sh"
+            sudo chmod +x archlinux/bin/build-wine.sh
+            ls -l archlinux/bin/build-wine.sh
+            echo "OK: 已放置 archlinux/bin/build-wine.sh（+x）"
           else
             echo "FAIL: 放置 build-wine.sh 失败"; ls -l build-wine.sh archlinux/bin 2>&1 || true; exit 1
           fi
