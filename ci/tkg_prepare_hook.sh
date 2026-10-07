@@ -136,9 +136,12 @@ elif [ -f loader/preloader.c ] && [ -f dlls/ntdll/unix/virtual.c ]; then
   VMA=$(grep -c '0x7ffe000000' dlls/ntdll/unix/virtual.c || true)
   LEFT=$( { grep -rn '0x7ffffe000000\|0x7fffffff0000' --include='*.c' --include='*.h' . 2>/dev/null || true; } | wc -l )
   msg2 "39-bit VA check: preloader=${HIA} virtual=${VMA} leftover=${LEFT}"
-  if [ "${HIA}" = "0" ] || [ "${VMA}" = "0" ] || [ "${LEFT}" != "0" ]; then
+  if [ "${VMA}" = "0" ] || [ "${LEFT}" != "0" ]; then
     echo "!!! FAIL: 39-bit VA 高区适配未生效 (preloader=${HIA} virtual=${VMA} leftover=${LEFT})"
     exit 1
+  fi
+  if [ "${HIA}" = "0" ]; then
+    warning "39-bit VA: preloader.c 无高区常量（11.18+ 上游已移走）-> 视为无需适配"
   fi
 else
   warning "39-bit VA: 找不到 preloader.c / virtual.c，跳过"
