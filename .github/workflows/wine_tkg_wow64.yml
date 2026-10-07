@@ -248,7 +248,17 @@ jobs:
           fi
 
           # 1) 把 _termux_path_fix 函数追加到 prepare.sh 末尾
-          cat "$GITHUB_WORKSPACE/ci/tkg_prepare_hook.sh" >> "$PREPARE_SH"
+          _hook_src=""
+          for _c in "$GITHUB_WORKSPACE/ci/tkg_prepare_hook.sh" /tmp/ci/tkg_prepare_hook.sh /tmp/wine-termux/tkg_prepare_hook.sh; do
+            if [ -f "$_c" ]; then _hook_src="$_c"; break; fi
+          done
+          if [ -n "$_hook_src" ]; then
+            echo "注入 prepare.sh 钩子: $_hook_src"
+            cat "$_hook_src" >> "$PREPARE_SH"
+          else
+            echo "找不到 ci/tkg_prepare_hook.sh（已试 GITHUB_WORKSPACE/ci、/tmp/ci、/tmp/wine-termux）"
+            exit 1
+          fi
 
           # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_termux_path_fix`
           awk '
