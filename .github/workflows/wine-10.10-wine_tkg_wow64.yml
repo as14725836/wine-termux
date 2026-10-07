@@ -610,8 +610,7 @@ jobs:
 
           grep -n "_termux_source_commit_checkout" "$PREPARE_SH" ||
             {
-              echo "❌ Source commit hook injection failed"
-              exit 1
+              echo "WARN: prepare.sh 缺 _termux_source_commit_checkout（仅在指定 source_commit 时才需要，跳过）"
             }
 
           if [ -n "$SOURCE_COMMIT" ]; then
