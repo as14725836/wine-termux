@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Proton release tag 或 ValveSoftware/wine 分支（例如：proton-10.0-4 / proton_9.0 / proton_10.0；不填则使用最新 release）'
+        description: 'Proton release tag（可选，例如：proton-10.0-4，不填则使用最新 release）'
         required: false
         type: string
 
