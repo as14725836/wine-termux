@@ -411,7 +411,7 @@ jobs:
           #
           # =====================================================================
 
-          cat >> "$PREPARE_SH" << 'EOF'
+          cat >> "$PREPARE_SH" << 'PREPARE_HOOK_EOF'
 
           # ===================== Wine source commit override =====================
           _termux_source_commit_checkout()
@@ -516,24 +516,26 @@ jobs:
           }
           # ===================== Wine source commit override end =================
 
-          EOF
+          PREPARE_HOOK_EOF
 
           # ---- runner 侧：注入 hook 到 TkG 脚本（NMBS/PREPARE_SH 此前只在 build-wine.sh 内定义，
           #      在 runner 这个 shell 里是空的，导致 mv .new '' 失败）----
-          NMBS="$(find "$PWD/archlinux/tmp" /tmp/archlinux/tmp -maxdepth 4 -name non-makepkg-build.sh -type f 2>/dev/null | head -1)"
-          PREPARE_SH="$(find "$PWD/archlinux/tmp" /tmp/archlinux/tmp -maxdepth 6 -path '*wine-tkg-scripts/prepare.sh' -type f 2>/dev/null | head -1)"
-          TKG_DIR="$(dirname "${NMBS:-/dev/null}")"
-          echo "runner 侧定位: TKG_DIR=$TKG_DIR"
-          echo "runner 侧定位: NMBS=$NMBS"
-          echo "runner 侧定位: PREPARE_SH=$PREPARE_SH"
-          if [ -z "$NMBS" ] || [ ! -f "$NMBS" ]; then
-            echo "❌ runner 侧未找到 non-makepkg-build.sh，无法注入 hook"
-            find "$PWD/archlinux/tmp" -maxdepth 3 -type d 2>/dev/null | head -20 || true
-            exit 1
+          _cand="$(find "$PWD/archlinux/tmp" /tmp/archlinux/tmp /tmp/wine-tkg-git -maxdepth 5 -name non-makepkg-build.sh -type f 2>/dev/null | head -1)"
+          if [ -n "$_cand" ]; then
+            NMBS="$_cand"
+            TKG_DIR="$(dirname "$_cand")"
+            PREPARE_SH="$TKG_DIR/wine-tkg-scripts/prepare.sh"
+          else
+            echo "WARN: 未定位到 non-makepkg-build.sh（chroot 内执行时属正常，沿用已有值: ${NMBS:-空}）"
           fi
-          if [ -z "$PREPARE_SH" ] || [ ! -f "$PREPARE_SH" ]; then
-            echo "❌ runner 侧未找到 wine-tkg-scripts/prepare.sh"
-            exit 1
+          echo "定位结果: TKG_DIR=${TKG_DIR:-空}"
+          echo "定位结果: NMBS=${NMBS:-空}"
+          echo "定位结果: PREPARE_SH=${PREPARE_SH:-空}"
+          if [ -z "${NMBS:-}" ] || [ ! -f "${NMBS:-/nonexistent}" ]; then
+            echo "WARN: NMBS 不可用 -> 跳过 runner 侧 hook 注入（chroot 内会再做）"
+          fi
+          if [ -z "${PREPARE_SH:-}" ] || [ ! -f "${PREPARE_SH:-/nonexistent}" ]; then
+            echo "WARN: PREPARE_SH 不可用 -> 跳过 runner 侧 hook 注入"
           fi
 
           # 2) 在 non-makepkg-build.sh 的 `_prepare` 后插入 `_termux_path_fix`
@@ -547,16 +549,20 @@ jobs:
             echo "runner 侧: 已把 hook 注入 prepare.sh"
           fi
 
-          awk '
-            /^[[:space:]]*_prepare[[:space:]]*$/ && !done {
-              print
-              print "        _termux_path_fix"
-              print "        _termux_import_name_fix"
-              done=1
-              next
-            }
-            { print }
-          ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+          if [ -n "${NMBS:-}" ] && [ -f "${NMBS:-/nonexistent}" ]; then
+            awk '
+              /^[[:space:]]*_prepare[[:space:]]*$/ && !done {
+                print
+                print "        _termux_path_fix"
+                print "        _termux_import_name_fix"
+                done=1
+                next
+              }
+              { print }
+            ' "$NMBS" > "$NMBS.new" && mv "$NMBS.new" "$NMBS"
+          else
+            echo "WARN: 跳过 _prepare 注入（NMBS 不可用）"
+          fi
 
           echo "===== Hook check ====="
 
