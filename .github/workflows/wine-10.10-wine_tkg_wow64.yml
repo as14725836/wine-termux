@@ -582,10 +582,10 @@ jobs:
 
           echo "===== Source commit hook injection ====="
 
-          if grep -qE '^[[:space:]]*_src_init[[:space:]]*$' "$PREPARE_SH"; then
+          if grep -qE '^[[:space:]]*_src_init([[:space:]]|$)' "$PREPARE_SH"; then
 
             awk '
-              /^[[:space:]]*_src_init[[:space:]]*$/ && !done {
+              /^[[:space:]]*_src_init([[:space:]]|$)/ && !done {
                 print
                 print "        _termux_source_commit_checkout"
                 done=1
@@ -601,11 +601,9 @@ jobs:
             mv "$PREPARE_SH.new" "$PREPARE_SH"
 
           else
-            echo "❌ Could not find _src_init invocation in prepare.sh"
-            echo
+            echo "WARN: prepare.sh 里未找到 _src_init（源码提交覆盖钩子跳过，不影响常规构建）"
             echo "Searching prepare.sh:"
-            grep -nE 'src_init|_prepare' "$PREPARE_SH" | head -100 || true
-            exit 1
+            grep -nE 'src_init|_prepare' "$PREPARE_SH" | head -40 || true
           fi
 
           echo "===== Source commit hook check ====="
