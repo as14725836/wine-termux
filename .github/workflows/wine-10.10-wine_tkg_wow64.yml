@@ -742,7 +742,18 @@ jobs:
 
           cd "$TKG_DIR" 2>/dev/null || cd "$(dirname "${NMBS:-.}")" 2>/dev/null || true
           chmod +x ./non-makepkg-build.sh 2>/dev/null || chmod +x "${NMBS:-./non-makepkg-build.sh}" || true
-          yes | ./non-makepkg-build.sh || { echo "❌ non-makepkg-build.sh 执行失败"; exit 1; }
+          # 注意：GitHub 默认 bash -o pipefail，脚本提前退出会让 yes 收到 SIGPIPE(141) 造成假失败
+          set +o pipefail
+          yes | ./non-makepkg-build.sh
+          _nmbs_rc=$?
+          set -o pipefail
+          echo "non-makepkg-build.sh 退出码: ${_nmbs_rc}"
+          echo "--- /tmp/output ---"
+          ls -la /tmp/output 2>/dev/null | head -20 || true
+          if [ "${_nmbs_rc}" != "0" ]; then
+            echo "❌ non-makepkg-build.sh 执行失败 (rc=${_nmbs_rc})"
+            exit 1
+          fi
 
           cd /tmp/output/
 
