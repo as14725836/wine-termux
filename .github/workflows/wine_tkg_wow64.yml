@@ -448,7 +448,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           target_commitish: ${{ steps.wine_tag.outputs.wine_ver }}${{ steps.wine_tag.outputs.PKG_NAME }}
-          tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}
+          tag_name: ${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-fex
           name: Wine ${{ steps.wine_tag.outputs.wine_ver }} (${{ steps.wine_tag.outputs.PKG_NAME }}) ${{ steps.wine_tag.outputs.VARIANT_DESC }}
           body: |
             自动编译版本。
