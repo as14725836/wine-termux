@@ -1,0 +1,17 @@
+wine tag       : wine-10.15
+package name   : mf
+variant        : default
+staging        : on
+39-bit patch   : applied
+enable_mf      : true
+enable_esync   : false
+workflow sha   : 3483757b8e38efa517cfea4f1d6fe9c0dac32741
+run            : #80 (id 37850575654)
+built at (UTC) : 2026-10-08T22:26:49Z
+
+-- 源码树校验 --
+virtual.c 0x7fffff0000           : 5
+virtual.c 0x7ffe000000           : 1
+virtual.c wine_emulator_detected : 4
+virtual.c box64/emu compat       : 3
+seccomp NATIVE_SYSCALL_ADDRESS_START : #define NATIVE_SYSCALL_ADDRESS_START 0x1000000000
