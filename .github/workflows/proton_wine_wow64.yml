@@ -271,7 +271,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.wine_tag.outputs.wine_tag }}-fex
+          tag_name: ${{ steps.wine_tag.outputs.wine_tag }}
           name: Proton Wine ${{ steps.wine_tag.outputs.proton_rel }}
           body: |
             源码修改查看此仓库补丁，这是非TkG版本的原版proton wine编译。
