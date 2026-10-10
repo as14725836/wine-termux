@@ -1,0 +1,18 @@
+--- dlls/ntdll/unix/virtual.c	2024-03-08 22:35:07.000000000 +0000
++++ dlls/ntdll/unix/virtual.c	2026-10-04 03:30:59.371308169 +0000
+@@ -2106,6 +2106,15 @@
+             if (flags & MAP_SHARED)
+             {
+                 if (prot & PROT_EXEC) ERR( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
++                if ((prot & PROT_EXEC) && !(vprot & VPROT_WRITE) && wine_emulator_detected())
++                {
++                    /* box64/emu compat: under an x86 emulator this mapping is only
++                     * data (the code is translated, not executed from it), so a
++                     * read-only executable mapping on a noexec filesystem can be
++                     * satisfied by the read() fallback below instead of failing. */
++                    WARN( "box64/emu compat: noexec exec map relaxed, falling back to read\n" );
++                    break;
++                }
+                 return STATUS_ACCESS_DENIED;
+             }
+             if (prot & PROT_EXEC) WARN( "failed to set PROT_EXEC on file map, noexec filesystem?\n" );
