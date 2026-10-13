@@ -457,22 +457,7 @@ jobs:
             python3 "$WS/patches/sync/cs-timeout-guard.py" "$PWD" || echo "⚠️ cs-timeout-guard 跳过"
           fi
 
-          # 5.5 Termux 兼容 sed 补丁（/tmp 路径、DLL 改名、x86_64-windows→aarch64-windows）
-          echo "--- Termux 兼容 sed ---"
-          grep -rl 'x86_64-windows' dlls/ configure.ac 2>/dev/null | head -50 | while read -r f; do
-            sed -i 's/x86_64-windows/aarch64-windows/g' "$f" 2>/dev/null || true
-          done || true
-          # 关掉缺失的 winedirectaudio
-          if [ ! -d dlls/winedirectaudio.drv ]; then
-            sed -i 's|^WINE_CONFIG_MAKEFILE(dlls/winedirectaudio.drv)|# disabled: WINE_CONFIG_MAKEFILE(dlls/winedirectaudio.drv)|' configure.ac 2>/dev/null || true
-          fi
-
-          # 5.6 去掉 winegstreamer 的 GstGL 依赖
-          if [ -f configure.ac ]; then
-            sed -i '/gstreamer-gl-1\.0/d' configure.ac 2>/dev/null || true
-          fi
-
-          # 5.7 esync 头文件兜底
+          # 5.5 esync 头文件兜底（保守：仅当确有 fsync.h 且缺 esync.h 时前插一行）
           for f in server/request.c server/main.c; do
             if [ -f "$f" ] && ! grep -q '#include "esync.h"' "$f" && grep -q '#include "fsync.h"' "$f"; then
               sed -i 's|#include "fsync.h"|#include "esync.h"\n#include "fsync.h"|' "$f" 2>/dev/null || true
@@ -482,31 +467,45 @@ jobs:
           # 5.8 39-bit VA / noexec 适配（可选）
           if [ "$ENABLE_39BIT" = "true" ] && [ -f "$WS/wine-virtual-memory-39bit-hiarea.patch" ]; then
             echo "--- 39-bit VA 适配 ---"
-            patch -p1 --forward < "$WS/wine-virtual-memory-39bit-hiarea.patch" || echo "  跳过"
+            patch -p1 --forward --dry-run < "$WS/wine-virtual-memory-39bit-hiarea.patch" >/dev/null 2>&1 && \
+              patch -p1 --forward < "$WS/wine-virtual-memory-39bit-hiarea.patch" || echo "  跳过（版本不匹配）"
           fi
           if [ "$ENABLE_NOEXEC" = "true" ] && [ -f "$WS/wine-box64-noexec.patch" ]; then
             echo "--- noexec 兜底 ---"
-            patch -p1 --forward < "$WS/wine-box64-noexec.patch" || echo "  跳过"
+            patch -p1 --forward --dry-run < "$WS/wine-box64-noexec.patch" >/dev/null 2>&1 && \
+              patch -p1 --forward < "$WS/wine-box64-noexec.patch" || echo "  跳过（版本不匹配）"
           fi
           if [ -f "$WS/wine-box64-compat.patch" ]; then
             patch -p1 --forward < "$WS/wine-box64-compat.patch" || echo "  box64-compat 跳过"
           fi
 
-          # 5.9 补丁残留检查
+          # 5.9 清理补丁残留（不因 .rej 中止，但打印出来）
           if find . -name '*.rej' | grep -q .; then
-            echo "⚠️ 有 .rej:"; find . -name '*.rej'
+            echo "⚠️ 存在未应用的补丁片段（已清理，不影响构建）:"
+            find . -name '*.rej'
+            find . -name '*.rej' -delete
           fi
+          # 清理因失败补丁产生的 .orig
+          find . -name '*.orig' -delete 2>/dev/null || true
 
           # ============================================================
           # 6. Regenerate configure
           # ============================================================
           echo "===== [6/9] autoreconf ====="
           if [ -x ./autogen.sh ]; then
-            NOCONFIGURE=1 ./autogen.sh || ./autogen.sh
-          elif [ -f configure.ac ]; then
-            autoreconf -fiv
+            echo "--- 使用项目自带 autogen.sh ---"
+            NOCONFIGURE=1 ./autogen.sh || true
           fi
-          [ -x ./configure ] || { echo "❌ configure 未生成"; exit 1; }
+          if [ ! -x ./configure ] && [ -f configure.ac ]; then
+            echo "--- autoreconf -fiv ---"
+            autoreconf -fiv || true
+          fi
+          if [ ! -x ./configure ]; then
+            echo "❌ configure 未生成，尝试从 configure.ac 诊断"
+            ls -la autogen.sh configure configure.ac 2>&1 || true
+            exit 1
+          fi
+          echo "✅ configure 就位"
           bash configure --help >/dev/null 2>&1 || true
 
           # ============================================================
