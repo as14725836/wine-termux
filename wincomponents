@@ -15,7 +15,8 @@
 
 用法：
     wincomponents            打开界面
-    wincomponents --selftest 只打印认到的环境，不开窗
+    wincomponents --selftest     只打印认到的环境，不开窗
+    wincomponents --mirror-test  测一遍 GitHub 加速镜像哪个能用
     wincomponents --refresh  强制重拉组件目录后开窗
 """
 import sys, os, re, json, time, shutil, tarfile, zipfile, lzma, hashlib
@@ -486,6 +487,202 @@ def delete_package(path, parent=None, is_current=False):
 
 CATALOG = "https://raw.githubusercontent.com/Droid-Deck/DroidDeck-Components/main/components.json"
 CATALOG_MIRROR = "https://github.com/Droid-Deck/DroidDeck-Components/raw/main/components.json"
+
+# ── 国内可达的 GitHub 加速前缀 ────────────────────────────
+# 用户多半没梯子，github.com 的 releases 直连会超时 / 断流。
+# 这些前缀把 https://github.com/<path> 变成一个镜像地址：<prefix>/https://github.com/<path>
+# 顺序只是"先试哪个"，真正用哪个由测速决定。
+GH_MIRRORS = [
+    "https://gh-proxy.com/",             # 实测最稳
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+    "https://gh.llkk.cc/",
+    "",                                  # 空 = 直连，放最后兜底
+]
+
+# 目录文件（raw.githubusercontent.com）单独一组 —— 路径形态不同，镜像不一定通用
+RAW_MIRRORS = [
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+    "https://gh.llkk.cc/",
+    "",
+]
+
+# 用户可以用 WC_MIRROR 强制指定（例如自建反代）。
+_ENV_MIRROR = os.environ.get("WC_MIRROR", "").strip()
+
+# 选中的前缀缓存到磁盘，下次直接用，不再重复测速。
+_MIRROR_CACHE = Path(os.environ.get("WC_CACHE", Path.home() / ".cache/wincomponents")) / "mirror.txt"
+
+
+def _mirror_url(url, prefix):
+    """把直链套上镜像前缀。空前缀 = 原样。"""
+    if not prefix:
+        return url
+    return prefix.rstrip("/") + "/" + url
+
+
+def _is_github(url):
+    return url.startswith(("https://github.com/", "http://github.com/")) or \
+        url.startswith("https://raw.githubusercontent.com/")
+
+
+def _probe(url, timeout=8):
+    """探测一个 url 好不好用，返回 (秒, 字节数)；失败返回 (None, 0)。
+
+    只抓前 64KB 就断开 —— 测的是"连得上 + 有速度"，不是下完。
+    """
+    import time as _t
+    req = urllib.request.Request(url, headers={"User-Agent": "wincomponents/1.0",
+                                               "Range": "bytes=0-32767"})
+    t0 = _t.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            n = 0
+            while n < 32768:
+                chunk = r.read(8192)
+                if not chunk:
+                    break
+                n += len(chunk)
+        return (_t.time() - t0), n
+    except Exception:
+        return None, 0
+
+
+def pick_mirror(url, timeout=8, log=None):
+    """给一个 GitHub 链接挑最快能用的镜像前缀，结果存盘。
+
+    - WC_MIRROR 设了就直接用
+    - 探过就复用缓存
+    - 否则并发测速，取最快
+    """
+    if _ENV_MIRROR:
+        return _ENV_MIRROR
+    if not _is_github(url):
+        return ""
+
+    ck = str(_MIRROR_CACHE) + "." + hashlib.md5(url.encode()).hexdigest()[:8]
+    if os.path.exists(ck):
+        try:
+            pref = open(ck).read().strip()
+            if pref in GH_MIRRORS:
+                return pref
+        except Exception:
+            pass
+
+    cands = RAW_MIRRORS if "raw.githubusercontent.com" in url else GH_MIRRORS
+    # 并发探：谁先跑出速度就用谁（够快就不等剩下的）—— 串行最坏要等 5 倍超时
+    import threading
+    results = []
+    lock = threading.Lock()
+    stop = threading.Event()
+    FAST = 150 * 1024          # 150 KB/s 就算能用，不用再等别人
+
+    def probe(pref):
+        if stop.is_set():
+            return
+        t, n = _probe(_mirror_url(url, pref), timeout=timeout)
+        if stop.is_set() or t is None or n == 0:
+            return
+        spd = n / max(t, 1e-6)
+        with lock:
+            results.append((pref, spd))
+            if spd >= FAST:
+                stop.set()
+
+    ts = [threading.Thread(target=probe, args=(p,), daemon=True) for p in cands]
+    for t in ts:
+        t.start()
+
+    # 渐进等待：先给 3 秒，谁有结果就用谁；一直没结果才等到超时。
+    deadline = time.time() + timeout + 0.5
+    for t in ts:
+        left = min(3.0, max(0.0, deadline - time.time()))
+        t.join(left)
+        if results and not stop.is_set():
+            break                    # 已经有能用的了，剩下的不等了
+    if not results:
+        for t in ts:
+            t.join(max(0.0, deadline - time.time()))
+
+    best, best_t = "", None
+    for pref, spd in results:
+        # 直连优先（同速时直连更稳，没中间人）
+        if best_t is None or spd > best_t * 1.15 or (pref == "" and spd >= best_t * 0.9):
+            best, best_t = pref, spd
+    if results and log:
+        try:
+            log("镜像测速: " + ", ".join(
+                ("直连" if not p else p.split("//")[-1].rstrip("/")) + "=%.0fKB/s" % (sp / 1024)
+                for p, sp, _ in results))
+        except Exception:
+            pass
+    if best:
+        try:
+            Path(ck).parent.mkdir(parents=True, exist_ok=True)
+            Path(ck).write_text(best)
+        except Exception:
+            pass
+    return best
+
+
+def _mirror_file(url):
+    return str(_MIRROR_CACHE) + "." + hashlib.md5(url.encode()).hexdigest()[:8]
+
+
+def _host_key(url):
+    """这个 url 属于 github 还是 raw —— 两组镜像不通用。"""
+    return "raw" if "raw.githubusercontent.com" in url else "gh"
+
+
+def remembered_mirror(url):
+    """上次下载成功的镜像前缀。没有就 None。"""
+    try:
+        f = _mirror_file(url)
+        if os.path.exists(f):
+            return open(f).read().strip()
+    except Exception:
+        pass
+    return None
+
+
+def remember_mirror(url, used_url):
+    """记下这个 url 用的是哪个前缀（下次优先用）。"""
+    cands = RAW_MIRRORS if _host_key(url) == "raw" else GH_MIRRORS
+    for p in cands:
+        if _mirror_url(url, p) == used_url:
+            try:
+                fp = Path(_mirror_file(url))
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_text(p)
+            except Exception:
+                pass
+            return
+
+
+def _fast_candidates(url):
+    """下载候选顺序：上次成功的打头，然后其它镜像，最后直连。
+
+    不做预探测 —— 直接开下，靠"热度窗口"快速甩掉慢的。这样首字节是 0 等待。
+    """
+    if not _is_github(url):
+        return [url]
+    cands = RAW_MIRRORS if _host_key(url) == "raw" else GH_MIRRORS
+    prev = remembered_mirror(url)
+    # 直连排最后：国内直连 github 多半是龟速，让它兜底就好
+    order = []
+    if prev is not None:
+        order.append(prev)
+    order += [p for p in cands if p and p != prev]
+    order.append("")
+    seen, out = set(), []
+    for p in order:
+        u = _mirror_url(url, p)
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 DEFAULT_STORE = Path(os.environ.get("WC_STORE", str(Path.home() / ".local/share/wincomponents")))
 
 FILE_STEPS = {"archive_extract", "download_archive", "copy_dll", "copy_file",
@@ -516,22 +713,34 @@ def dest_path(dest, is_dll=True):
 
 
 def fetch_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "wc-install"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read().decode("utf-8"))
+    last = None
+    for u in _fast_candidates(url):
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "wc-install"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            last = e
+    raise last if last else RuntimeError("拿不到 " + url)
 
 
-def download(url, dest, checksum=None, progress=None):
-    """下载一个文件。
+# 连接后就给 8 秒"热度窗口" —— 这段时间内下不满 256KB 就换下一个镜像。
+# 国内直连 github 的典型表现是"连得上但龟速/断流"，热度窗口能立刻甩掉它。
+HEAT_SECONDS = 8.0
+HEAT_BYTES = 256 * 1024
 
-    progress(done, total, filename) 会被反复调用（total 为 0 表示长度未知），
-    界面靠它画进度条。
+
+def _download_once(url, dest, progress=None):
+    """从单个地址下一遍，带热度检查。
+
+    返回 (下到的字节数, 声称的总大小)。太慢或出错就抛异常。
     """
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    import time as _t
     req = urllib.request.Request(url, headers={"User-Agent": "wc-install"})
     total = 0
-    with urllib.request.urlopen(req, timeout=600) as r, open(dest, "wb") as out:
+    size = 0
+    t0 = _t.time()
+    with urllib.request.urlopen(req, timeout=12) as r, open(dest, "wb") as out:
         size = int(r.headers.get("Content-Length") or 0)
         while True:
             chunk = r.read(1 << 20)
@@ -547,6 +756,10 @@ def download(url, dest, checksum=None, progress=None):
                     progress(total, size, dest.name)
                 except Exception:
                     pass
+            # 热度不够就早点认输，别耗在这儿
+            el = _t.time() - t0
+            if total < HEAT_BYTES and el > HEAT_SECONDS:
+                raise IOError("太慢（%.1fs 才 %d 字节）" % (el, total))
         if size:
             sys.stderr.write("\r" + " " * 60 + "\r")
     if progress is not None:
@@ -554,11 +767,44 @@ def download(url, dest, checksum=None, progress=None):
             progress(total, size or total, dest.name)
         except Exception:
             pass
-    if checksum:
-        got = _md5(dest)
-        if got != checksum.lower():
-            raise SystemExit("checksum mismatch for %s: %s != %s" % (dest.name, got, checksum))
-    return dest
+    return total, size
+
+
+def download(url, dest, checksum=None, progress=None):
+    """下载一个文件 —— 自动挑最快镜像，坏了就换下一个。
+
+    progress(done, total, filename) 会被反复调用（total 为 0 表示长度未知），
+    界面靠它画进度条。
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    last = None
+    tried = []
+    for u in _fast_candidates(url):
+        who = "直连" if u == url else u.split("//")[-1].split("/")[0]
+        try:
+            got, size = _download_once(u, dest, progress=progress)
+            if size and got < size:
+                raise IOError("只下到 %d/%d 字节" % (got, size))
+            if checksum:
+                good = _md5(dest)
+                if good != checksum.lower():
+                    raise IOError("校验不过：%s != %s" % (good, checksum))
+            remember_mirror(url, u)                 # 这个镜像好用，记住
+            if tried:
+                sys.stderr.write("  换到 %s 成功（跳过了 %s）\n" % (who, ", ".join(tried)))
+            return dest
+        except Exception as e:
+            last = e
+            tried.append("%s:%s" % (who, str(e)[:32]))
+            if progress is not None:
+                try:
+                    progress(0, 0, dest.name)       # 让进度条归零重来
+                except Exception:
+                    pass
+    raise IOError("下载 %s 失败，所有镜像都不行 —— %s"
+                  % (url.rsplit("/", 1)[-1], "; ".join(tried) or last))
 
 
 def last_extract(work, index, roots):
@@ -1582,9 +1828,16 @@ def fetch_catalog(force=False, timeout=25):
             except Exception:
                 pass
     last = None
-    for url in (CATALOG, CATALOG_MIRROR):
+    cands = []
+    for base in (CATALOG, CATALOG_MIRROR):
+        cands.extend(_fast_candidates(base))
+    seen = set()
+    for u in cands:
+        if u in seen:
+            continue
+        seen.add(u)
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "wincomponents/1.0"})
+            req = urllib.request.Request(u, headers={"User-Agent": "wincomponents/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
             data = json.loads(raw.decode("utf-8"))
@@ -3278,7 +3531,43 @@ def _selftest():
     return 0
 
 
+def _mirror_test():
+    """--mirror-test：把每个镜像实测一遍，看哪个能用、多快。"""
+    U = ("https://github.com/Droid-Deck/DroidDeck-Components/releases/download/"
+         "system-libraries-v1/d3dx9.tar.xz")
+    print("测速文件: d3dx9.tar.xz (18.7 MB)")
+    print("各镜像抓前 512KB：\n")
+    cands = GH_MIRRORS
+    rows = []
+    for pref in cands:
+        url = _mirror_url(U, pref)
+        who = "直连" if not pref else pref.split("//")[-1].rstrip("/")
+        req = urllib.request.Request(url, headers={"User-Agent": "wc",
+                                                   "Range": "bytes=0-524287"})
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=HEAT_SECONDS) as r:
+                n = 0
+                while n < 524288:
+                    c = r.read(65536)
+                    if not c:
+                        break
+                    n += len(c)
+            el = time.time() - t0
+            spd = n / max(el, 1e-6) / 1024
+            rows.append((spd, who, "%.1f KB/s（%.1f 秒）" % (spd, el)))
+        except Exception as e:
+            rows.append((-1, who, "不可用：%s" % str(e)[:40]))
+    for _, who, info in sorted(rows, reverse=True):
+        print("  %-22s %s" % (who, info))
+    print()
+    print("首次下载会自动选一个能用的；WC_MIRROR=<前缀> 可以强制指定。")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--mirror-test" in sys.argv:
+        sys.exit(_mirror_test())
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
 
