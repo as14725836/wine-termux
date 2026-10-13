@@ -378,6 +378,7 @@ jobs:
             hotfixer_override.sh \
             versioning_fix.sh \
             import_name_fallback.sh \
+            describe_wine_fix.sh \
             wine_import_name_cp_fallback.patch; do
 
             if [ ! -f "$CI_DIR/$_cif" ]; then
@@ -390,6 +391,19 @@ jobs:
 
           cat "$CI_DIR/termux_hook.sh" >> "$PREPARE_SH"
           cat "$CI_DIR/import_name_fallback.sh" >> "$PREPARE_SH"
+
+          # ---- 修复：brunodev85/wine-10.10-custom 无 tag，TkG _describe_wine 的
+          #      `git describe --long --tags` 会 fatal，配合 set -e 让脚本在 configure
+          #      之前就退出（日志停在 "exit cleanup done"），/tmp/output 不生成。
+          #      追加容错版 _describe_wine / _describe_other（同文件后定义者胜）。
+          if [ -f "$CI_DIR/describe_wine_fix.sh" ]; then
+            if ! grep -q '_ci_ensure_wine_tag' "$PREPARE_SH" 2>/dev/null; then
+              cat "$CI_DIR/describe_wine_fix.sh" >> "$PREPARE_SH"
+              echo "OK: 已把 describe_wine_fix 注入 prepare.sh"
+            fi
+          else
+            echo "WARN: 缺少 $CI_DIR/describe_wine_fix.sh（tagless 树可能构建失败）"
+          fi
 
           # ===================== 新增：Wine 源码提交选择 hook =====================
           #
@@ -416,6 +430,10 @@ jobs:
           # ===================== Wine source commit override =====================
           _termux_source_commit_checkout()
           {
+              # 无论是否指定 source_commit，都先给 tagless 的定制树补一个 tag，
+              # 否则后面 TkG 的 _describe_wine (git describe --long --tags) 会 fatal 退出。
+              command -v _ci_ensure_wine_tag >/dev/null 2>&1 && _ci_ensure_wine_tag || true
+
               local _requested="${SOURCE_COMMIT:-}"
 
               # 没有指定 revision：
@@ -547,6 +565,10 @@ jobs:
             cat "$CI_DIR/termux_hook.sh" >> "$PREPARE_SH"
             [ -f "$CI_DIR/import_name_fallback.sh" ] && cat "$CI_DIR/import_name_fallback.sh" >> "$PREPARE_SH"
             echo "runner 侧: 已把 hook 注入 prepare.sh"
+          fi
+          if [ -f "$CI_DIR/describe_wine_fix.sh" ] && ! grep -q '_ci_ensure_wine_tag' "$PREPARE_SH" 2>/dev/null; then
+            cat "$CI_DIR/describe_wine_fix.sh" >> "$PREPARE_SH"
+            echo "runner 侧: 已把 describe_wine_fix 注入 prepare.sh"
           fi
 
           if [ -n "${NMBS:-}" ] && [ -f "${NMBS:-/nonexistent}" ]; then

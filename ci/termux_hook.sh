@@ -2,6 +2,9 @@
 # Termux path fix + mfplat patch (auto-injected by CI)
 ########################################################################
 _termux_path_fix() {
+  # 先确保 tagless 的定制树有一个 tag（否则后续 _describe_wine 会 fatal 退出）
+  command -v _ci_ensure_wine_tag >/dev/null 2>&1 && _ci_ensure_wine_tag || true
+
   local _src="${srcdir}/${_winesrcdir}"
   if [ ! -d "$_src" ]; then
     warning "Termux path fix: source dir not found: $_src"
