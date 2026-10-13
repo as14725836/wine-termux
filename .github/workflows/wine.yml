@@ -377,13 +377,14 @@ jobs:
               deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | grep -v 'dbgsym' | sort -V | tail -1)
               if [ -z "$deb" ]; then echo "  ⚠️ runtime 未找到 $pkg"; continue; fi
               if curl -fsL -o "$deb" "${idx}${deb}"; then
-                ar x "$deb" 2>/dev/null || bsdtar xf "$deb" 2>/dev/null || true
-                dataf=$(ls data.tar.* 2>/dev/null | head -1)
+                _td=$(mktemp -d)
+                ( cd "$_td" && { ar x "$OLDPWD/$deb" 2>/dev/null || bsdtar xf "$OLDPWD/$deb" 2>/dev/null || true; } )
+                dataf=$(ls "$_td"/data.tar.* 2>/dev/null | head -1)
                 if [ -n "$dataf" ]; then
                   tar xf "$dataf" -C "$ARM64_SYSROOT" --exclude='./usr/share/doc/*' \
                       --exclude='./usr/share/man/*' 2>/dev/null || true
-                  rm -f "$dataf" debian-binary control.tar.* 2>/dev/null || true
                 fi
+                rm -rf "$_td" "$deb" 2>/dev/null || true
               fi
             done
             echo "ℹ️ runtime 包补齐完成"
@@ -417,7 +418,15 @@ jobs:
                 cp -a "$ARM64_SYSROOT/usr/share/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
               fi
               echo "✅ 已合并到 $ARCH_SYSROOT"
-              ls -la "$ARCH_SYSROOT/lib/libX11.so" "$ARCH_SYSROOT/include/X11/Xlib.h" 2>&1 | head -4 || true
+              echo "--- sysroot 自检 ---"
+              ls -la "$ARCH_SYSROOT"/lib/libX11.so* "$ARCH_SYSROOT"/lib/libfreetype.so* 2>&1 | head -12 || true
+              printf '#include <X11/Xlib.h>\nint main(void){return (int)(long)XOpenDisplay(0);}\n' > /tmp/xchk.c
+              if aarch64-linux-gnu-gcc /tmp/xchk.c -o /tmp/xchk -lX11 2>/tmp/xchk.err; then
+                echo "✅ 链接自检: -lX11 OK"
+              else
+                echo "❌ 链接自检: -lX11 失败"; head -20 /tmp/xchk.err || true
+              fi
+              ls -la "$ARCH_SYSROOT/include/X11/Xlib.h" 2>&1 | head -2 || true
             fi
             touch "${ARM64_SYSROOT}/.done"
             cd /tmp
