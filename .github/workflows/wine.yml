@@ -1,0 +1,858 @@
+name: Build Wine ARM64 WOW64 (BCC Arch chroot, arm64ec)
+
+on:
+  workflow_dispatch:
+    inputs:
+      wine_branch:
+        description: 'Wine 构建类型'
+        required: false
+        default: 'proton'
+        type: choice
+        options:
+          - proton
+          - staging
+          - winearm64ec
+          - pipetto-proton9-arm64ec
+          - proton-10.34-GE
+          - proton-gamenative
+          - valve-wine
+          - valve-proton
+
+      wine_version:
+        description: 'Wine 版本，例如 11.19；latest 表示源码默认'
+        required: false
+        default: 'latest'
+        type: string
+
+      proton_branch:
+        description: 'Proton Wine 分支'
+        required: false
+        default: 'proton_11.0'
+        type: string
+
+      proton_commit:
+        description: 'Proton commit，可留空'
+        required: false
+        default: ''
+        type: string
+
+      gamenative_branch:
+        description: 'GameNative proton-wine 分支 (wine_branch=proton-gamenative)'
+        required: false
+        default: 'proton_11.0-2'
+        type: string
+
+      valve_repo:
+        description: 'Valve Wine 源码仓库 (wine_branch=valve-wine)'
+        required: false
+        default: 'https://github.com/ValveSoftware/wine.git'
+        type: string
+
+      valve_branch:
+        description: 'Valve 分支 (valve-wine / valve-proton)'
+        required: false
+        default: 'experimental_10.0'
+        type: string
+
+      staging_version:
+        description: 'Wine-Staging 版本，留空自动匹配'
+        required: false
+        default: ''
+        type: string
+
+      wine_archs:
+        description: 'Wine 目标架构'
+        required: false
+        default: 'arm64ec,aarch64,i386'
+        type: string
+
+      llvm_mingw_repo:
+        description: '主 llvm-mingw 仓库'
+        required: false
+        default: 'mstorsjo/llvm-mingw'
+        type: string
+
+      llvm_mingw_date:
+        description: 'llvm-mingw release tag'
+        required: false
+        default: '20251202'
+        type: string
+
+      llvm_mingw_name:
+        description: 'llvm-mingw 资产名（留空自动）'
+        required: false
+        default: ''
+        type: string
+
+      enable_39bit_va:
+        description: '启用 39-bit VA 适配'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      enable_noexec_fallback:
+        description: '启用 noexec read() 兜底'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      build_fex:
+        description: '同时编译 FEX (libarm64ecfex/libwow64fex)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      fex_repo:
+        description: 'FEX 仓库'
+        required: false
+        default: 'AndreRH/FEX'
+        type: string
+
+      fex_ref:
+        description: 'FEX 分支'
+        required: false
+        default: 'arm64ec'
+        type: string
+
+      publish_release:
+        description: '发布到 GitHub Release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+  push:
+    paths:
+      - '.github/workflows/wine.yml'
+      - 'ci/arm64/**'
+      - 'patches/arm64/**'
+  schedule:
+    - cron: '0 3 * * 0'
+
+permissions:
+  contents: write
+
+env:
+  BCC_ROOTFS_URL: https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+  TERMUX_GLIBC_PREFIX: /data/data/com.termux/files/usr/glibc
+  TERMUX_PREFIX: /data/data/com.termux/files/usr
+  OUT_DIR: /tmp/archlinux/tmp/wt-out
+
+jobs:
+  build-wine-arm64:
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 360
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download BCC Arch rootfs
+        run: |
+          set -e
+          cd /tmp
+          echo "📥 下载 BCC Arch rootfs ..."
+          curl -L --retry 5 --retry-delay 10 -o wine-bcc.tar.xz "$BCC_ROOTFS_URL"
+          ls -la wine-bcc.tar.xz
+          sudo tar xf wine-bcc.tar.xz
+          test -d /tmp/archlinux || { echo "❌ archlinux rootfs 未解出"; exit 1; }
+          sudo mkdir -p "$OUT_DIR"
+          echo "✅ rootfs ready"
+
+      - name: Stage repo into chroot
+        run: |
+          set -e
+          sudo mkdir -p /tmp/archlinux/tmp/wt-scripts
+          sudo cp -r "$GITHUB_WORKSPACE"/* /tmp/archlinux/tmp/wt-scripts/ 2>/dev/null || true
+          ls -la /tmp/archlinux/tmp/wt-scripts | head -40
+
+      - name: Write build template into chroot
+        run: |
+          set -e
+          sudo tee /tmp/archlinux/tmp/arm64-build.sh.tpl > /dev/null <<'ARMT'
+          #!/bin/bash
+          # Arch Linux chroot 内运行。构建 ARM64 (arm64ec/aarch64/i386) WOW64 Wine。
+          set -e -o pipefail
+          export LANG=C.UTF-8
+          export LC_ALL=C.UTF-8
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export DEBIAN_FRONTEND=noninteractive
+
+          WINE_BRANCH="@@WINE_BRANCH@@"
+          WINE_VERSION="@@WINE_VERSION@@"
+          PROTON_BRANCH="@@PROTON_BRANCH@@"
+          PROTON_COMMIT="@@PROTON_COMMIT@@"
+          GN_BRANCH="@@GN_BRANCH@@"
+          VALVE_REPO="@@VALVE_REPO@@"
+          VALVE_BRANCH="@@VALVE_BRANCH@@"
+          STAGING_VER="@@STAGING_VER@@"
+          WINE_ARCHS="@@WINE_ARCHS@@"
+          LLVM_REPO="@@LLVM_REPO@@"
+          LLVM_DATE="@@LLVM_DATE@@"
+          LLVM_NAME="@@LLVM_NAME@@"
+          ENABLE_39BIT="@@39BIT@@"
+          ENABLE_NOEXEC="@@NOEXEC@@"
+          BUILD_FEX="@@BUILD_FEX@@"
+          FEX_REPO="@@FEX_REPO@@"
+          FEX_REF="@@FEX_REF@@"
+
+          WS=/tmp/wt-scripts
+          SRC=/opt/wine-src
+          NATIVE=/opt/wine64-native
+          PREFIX=/tmp/wine-install-wow64
+          BUILD=/opt/wine-src/build-arm64
+          LLVM_MINGW=/opt/llvm-mingw
+          ARM64_SYSROOT=/opt/arm64-sysroot
+          JOBS=$(nproc)
+
+          echo "=============================================="
+          echo " ARM64 WOW64 Wine build (Arch chroot)"
+          echo "  branch=$WINE_BRANCH archs=$WINE_ARCHS"
+          echo "  nproc=$JOBS"
+          echo "=============================================="
+          uname -m
+          cat /etc/os-release | head -2
+
+          # ============================================================
+          # 1. 安装 aarch64-linux 交叉工具链 + 构建依赖（pacman）
+          # ============================================================
+          echo "===== [1/9] 安装依赖（pacman）====="
+          pacman -Sy --noconfirm --needed \
+            base-devel git curl wget xz zstd unzip file python perl pkgconf ccache \
+            autoconf automake libtool flex bison gettext nasm yasm cmake ninja meson \
+            aarch64-linux-gnu-gcc aarch64-linux-gnu-binutils aarch64-linux-gnu-glibc \
+            mingw-w64-gcc mingw-w64-crt mingw-w64-headers mingw-w64-binutils \
+            || { echo "⚠️ 首次 pacman 失败，重试一次"; pacman -Sy --noconfirm; pacman -S --noconfirm --needed \
+                  base-devel git curl xz zstd unzip file python perl pkgconf ccache \
+                  autoconf automake libtool flex bison gettext nasm cmake ninja meson \
+                  aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc mingw-w64-gcc mingw-w64-crt mingw-w64-headers; }
+
+          echo "--- 工具链验证 ---"
+          aarch64-linux-gnu-gcc --version | head -1
+          x86_64-w64-mingw32-gcc --version | head -1 || true
+          gcc --version | head -1
+          ls -d /usr/aarch64-linux-gnu 2>/dev/null && echo "✅ aarch64 sysroot: /usr/aarch64-linux-gnu"
+
+          # ============================================================
+          # 2. 安装 llvm-mingw（提供 arm64ec-w64-mingw32-clang）
+          # ============================================================
+          echo "===== [2/9] 安装 llvm-mingw ====="
+          if [ -z "$LLVM_NAME" ]; then
+            LLVM_NAME="llvm-mingw-${LLVM_DATE}-ucrt-ubuntu-22.04-x86_64"
+          fi
+          LLVM_TAR="/tmp/${LLVM_NAME}.tar.xz"
+          if [ ! -x "${LLVM_MINGW}/bin/arm64ec-w64-mingw32-clang" ]; then
+            rm -rf "$LLVM_MINGW"; mkdir -p "$LLVM_MINGW"
+            ok=0
+            for url in \
+              "https://github.com/${LLVM_REPO}/releases/download/${LLVM_DATE}/${LLVM_NAME}.tar.xz" \
+              "https://github.com/bylaws/llvm-mingw/releases/download/${LLVM_DATE}/${LLVM_NAME}.tar.xz" ; do
+              echo "尝试: $url"
+              if curl -fL --retry 3 -o "$LLVM_TAR" "$url"; then ok=1; break; fi
+            done
+            [ "$ok" = "1" ] || { echo "❌ llvm-mingw 下载失败"; exit 1; }
+            tar xf "$LLVM_TAR" -C "$LLVM_MINGW" --strip-components=1
+            rm -f "$LLVM_TAR"
+          fi
+          export PATH="${LLVM_MINGW}/bin:$PATH"
+          echo "${LLVM_MINGW}/lib" > /etc/ld.so.conf.d/llvm-mingw.conf
+          ldconfig || true
+          export LD_LIBRARY_PATH="${LLVM_MINGW}/lib:${LLVM_MINGW}/lib/clang/lib:${LD_LIBRARY_PATH:-}"
+          echo "--- llvm-mingw 验证 ---"
+          arm64ec-w64-mingw32-clang --version | head -1 || { echo "❌ arm64ec clang 缺失"; exit 1; }
+          aarch64-w64-mingw32-clang --version | head -1 || true
+          arm64ec-w64-mingw32-dlltool --version | head -1 || true
+
+          # ============================================================
+          # 3. 组装 aarch64-linux 交叉 sysroot
+          #    Arch 只有 glibc 层的 aarch64 交叉（/usr/aarch64-linux-gnu）。
+          #    X11/vulkan/pulse/freetype 等 arm64 运行库在 Arch 官方源没有，
+          #    从 Debian arm64 的 .deb 里抽（用 ar + tar，无需 apt）。
+          # ============================================================
+          echo "===== [3/9] 组装 arm64 sysroot ====="
+          mkdir -p "$ARM64_SYSROOT"
+          if [ ! -f "${ARM64_SYSROOT}/.done" ]; then
+            pacman -S --noconfirm --needed binutils libarchive bsdtar 2>/dev/null || true
+            cd /tmp
+            rm -rf arm64-debs && mkdir -p arm64-debs && cd arm64-debs
+            MIRROR="http://deb.debian.org/debian"
+            POOL="${MIRROR}/pool/main"
+            # 关键 arm64 dev 包（名字 -> pool 路径子目录）
+            # 直接用 packages.debian.org 的稳定路径：/debian/pool/main/<letter>/<pkg>/
+            declare -A DEBPKG=(
+              [libx11-dev]="libx/libx11"
+              [libxext-dev]="libx/libxext"
+              [libxi-dev]="libx/libxi"
+              [libxcursor-dev]="libx/libxcursor"
+              [libxrandr-dev]="libx/libxrandr"
+              [libxfixes-dev]="libx/libxfixes"
+              [libxcomposite-dev]="libx/libxcomposite"
+              [libxdamage-dev]="libx/libxdamage"
+              [libxxf86vm-dev]="libx/libxxf86vm"
+              [libxrender-dev]="libx/libxrender"
+              [libxinerama-dev]="libx/libxinerama"
+              [libxshmfence-dev]="libx/libxshmfence"
+              [libxkbcommon-dev]="libx/libxkbcommon"
+              [libfreetype-dev]="f/freetype"
+              [libfontconfig-dev]="f/fontconfig"
+              [libexpat1-dev]="e/expat"
+              [libpng-dev]="libp/libpng1.6"
+              [libglib2.0-dev]="g/glib2.0"
+              [libdbus-1-dev]="d/dbus"
+              [libunwind-dev]="libu/libunwind"
+              [libvulkan-dev]="v/vulkan-loader"
+              [libwayland-dev]="w/wayland"
+            )
+            fetched=0
+            for pkg in "${!DEBPKG[@]}"; do
+              sub="${DEBPKG[$pkg]}"
+              # 列 pool 目录，找 <pkg>_<ver>_arm64.deb
+              idx="${MIRROR}/pool/main/${sub}/"
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | sort -V | tail -1)
+              if [ -z "$deb" ]; then
+                echo "  ⚠️ 未找到 $pkg (arm64)"
+                continue
+              fi
+              if curl -fsL -o "$deb" "${idx}${deb}"; then
+                echo "  ✅ $deb"
+                # 解包 .deb（ar 归档 → data.tar.*）
+                ar x "$deb" 2>/dev/null || bsdtar xf "$deb" 2>/dev/null || true
+                dataf=$(ls data.tar.* 2>/dev/null | head -1)
+                if [ -n "$dataf" ]; then
+                  tar xf "$dataf" -C "$ARM64_SYSROOT" --exclude='./usr/share/doc/*' \
+                      --exclude='./usr/share/man/*' 2>/dev/null || true
+                  rm -f "$dataf" debian-binary control.tar.* 2>/dev/null || true
+                  fetched=$((fetched+1))
+                fi
+              fi
+            done
+            echo "ℹ️ 解出 $fetched 个 arm64 dev 包到 $ARM64_SYSROOT"
+            # 合并 Arch 自带的 aarch64 glibc sysroot（libc.so / crt 等）
+            if [ -d /usr/aarch64-linux-gnu ]; then
+              mkdir -p "$ARM64_SYSROOT/usr"
+              cp -a /usr/aarch64-linux-gnu "$ARM64_SYSROOT/usr/" 2>/dev/null || true
+            fi
+            # 生成 pkg-config 查找路径
+            mkdir -p "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig"
+            find "$ARM64_SYSROOT" -name '*.pc' -path '*pkgconfig*' 2>/dev/null | head -5 || true
+            touch "${ARM64_SYSROOT}/.done"
+            cd /tmp
+          else
+            echo "✅ arm64 sysroot 已存在（缓存）"
+          fi
+          ls -la "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" 2>/dev/null | head -10 || \
+            echo "ℹ️ $ARM64_SYSROOT 结构（best effort）"
+          find "$ARM64_SYSROOT" -maxdepth 4 -name 'libX11*' 2>/dev/null | head -3 || true
+
+          echo "✅ 阶段 1-3 完成"
+
+          # ============================================================
+          # 4. 获取 Wine 源码
+          # ============================================================
+          echo "===== [4/9] 获取 Wine 源码 ($WINE_BRANCH) ====="
+          rm -rf "$SRC"
+          mkdir -p "$SRC"
+          cd "$SRC"
+
+          case "$WINE_BRANCH" in
+            proton)
+              git clone --branch "$PROTON_BRANCH" --single-branch \
+                https://github.com/WinNative-Emu/proton-wine.git source
+              cd source
+              [ -n "$PROTON_COMMIT" ] && git checkout "$PROTON_COMMIT" || true
+              ;;
+            staging)
+              git clone --depth=1 https://github.com/wine-staging/wine-staging.git staging-src
+              UP=$(cat staging-src/staging/upstream-commit 2>/dev/null || echo master)
+              git clone https://github.com/wine-mirror/wine.git source
+              cd source
+              git checkout "$UP" 2>/dev/null || true
+              cd "$SRC"
+              python3 staging-src/staging/patchinstall.py DESTDIR="$SRC/source" --all --no-autoconf || true
+              ;;
+            winearm64ec)
+              git clone --branch w641010 https://github.com/hostei33/wine-tkg.git source
+              cd source
+              [ "$WINE_VERSION" != "latest" ] && git checkout "wine-$WINE_VERSION" 2>/dev/null || true
+              ;;
+            pipetto-proton9-arm64ec)
+              git clone --branch proton-9.0-arm64ec https://github.com/Pipetto-crypto/wine.git source
+              cd source
+              ;;
+            proton-10.34-GE)
+              git clone --branch proton_10.34-GE https://github.com/The412Banner/proton-wine.git source
+              cd source
+              ;;
+            proton-gamenative)
+              git clone --branch "$GN_BRANCH" https://github.com/GameNative/proton-wine.git source
+              cd source
+              ;;
+            valve-wine)
+              git clone --branch "$VALVE_BRANCH" "$VALVE_REPO" source
+              cd source
+              ;;
+            valve-proton)
+              git clone --branch "$VALVE_BRANCH" https://github.com/ValveSoftware/Proton.git proton-repo
+              cd proton-repo
+              git submodule update --init --depth 1 wine || true
+              mv wine "$SRC/source"
+              cd "$SRC/source"
+              ;;
+            *)
+              echo "❌ 未知 wine_branch: $WINE_BRANCH"; exit 1 ;;
+          esac
+
+          cd "$SRC/source"
+          git submodule update --init --recursive --depth 1 2>/dev/null || true
+
+          # ---- 版本净化 ----
+          if [ -f VERSION ]; then
+            VER_SAFE=$(sed -n '1s/^Wine version //p' VERSION | tr ' ' '-' | tr -cd 'A-Za-z0-9._-')
+          fi
+          [ -n "$VER_SAFE" ] || VER_SAFE=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^wine-//' | tr -cd 'A-Za-z0-9._-')
+          [ -n "$VER_SAFE" ] || VER_SAFE="$WINE_VERSION"
+          WINE_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+          BUILD_NAME="wine-${VER_SAFE}-${WINE_COMMIT}-${WINE_BRANCH}-arm64ce-wow64"
+          echo "BUILD_NAME=$BUILD_NAME"
+
+          # ============================================================
+          # 5. 应用补丁
+          # ============================================================
+          echo "===== [5/9] 应用补丁 ====="
+          # 5.1 adapted-11.18 补丁（quartz colour / qasf asf / termux-dns）
+          for p in 0060-quartz-implement-colour-filter.patch 0061-qasf-deliver-compressed-asf-streams.patch termux-dns-fix.patch; do
+            if [ -f "$WS/$p" ]; then
+              echo "--- $p ---"
+              patch -p1 --forward --dry-run < "$WS/$p" >/dev/null 2>&1 && \
+                patch -p1 --forward < "$WS/$p" || echo "  跳过（不适用/已应用）"
+            fi
+          done
+
+          # 5.2 Termux 环境适配脚本
+          if [ -f "$WS/patches/termux-env/termux_env_tweaks.py" ]; then
+            python3 "$WS/patches/termux-env/termux_env_tweaks.py" "$PWD" || echo "⚠️ termux_env_tweaks 跳过"
+          fi
+
+          # 5.3 wow64 completion patches
+          if [ -f "$WS/patches/wow64/wow64-completion.py" ]; then
+            python3 "$WS/patches/wow64/wow64-completion.py" "$PWD" || echo "⚠️ wow64-completion 跳过"
+          fi
+
+          # 5.4 cs-timeout-guard
+          if [ -f "$WS/patches/sync/cs-timeout-guard.py" ]; then
+            python3 "$WS/patches/sync/cs-timeout-guard.py" "$PWD" || echo "⚠️ cs-timeout-guard 跳过"
+          fi
+
+          # 5.5 Termux 兼容 sed 补丁（/tmp 路径、DLL 改名、x86_64-windows→aarch64-windows）
+          echo "--- Termux 兼容 sed ---"
+          grep -rl 'x86_64-windows' dlls/ configure.ac 2>/dev/null | head -50 | while read -r f; do
+            sed -i 's/x86_64-windows/aarch64-windows/g' "$f" 2>/dev/null || true
+          done || true
+          # 关掉缺失的 winedirectaudio
+          if [ ! -d dlls/winedirectaudio.drv ]; then
+            sed -i 's|^WINE_CONFIG_MAKEFILE(dlls/winedirectaudio.drv)|# disabled: WINE_CONFIG_MAKEFILE(dlls/winedirectaudio.drv)|' configure.ac 2>/dev/null || true
+          fi
+
+          # 5.6 去掉 winegstreamer 的 GstGL 依赖
+          if [ -f configure.ac ]; then
+            sed -i '/gstreamer-gl-1\.0/d' configure.ac 2>/dev/null || true
+          fi
+
+          # 5.7 esync 头文件兜底
+          for f in server/request.c server/main.c; do
+            if [ -f "$f" ] && ! grep -q '#include "esync.h"' "$f" && grep -q '#include "fsync.h"' "$f"; then
+              sed -i 's|#include "fsync.h"|#include "esync.h"\n#include "fsync.h"|' "$f" 2>/dev/null || true
+            fi
+          done
+
+          # 5.8 39-bit VA / noexec 适配（可选）
+          if [ "$ENABLE_39BIT" = "true" ] && [ -f "$WS/wine-virtual-memory-39bit-hiarea.patch" ]; then
+            echo "--- 39-bit VA 适配 ---"
+            patch -p1 --forward < "$WS/wine-virtual-memory-39bit-hiarea.patch" || echo "  跳过"
+          fi
+          if [ "$ENABLE_NOEXEC" = "true" ] && [ -f "$WS/wine-box64-noexec.patch" ]; then
+            echo "--- noexec 兜底 ---"
+            patch -p1 --forward < "$WS/wine-box64-noexec.patch" || echo "  跳过"
+          fi
+          if [ -f "$WS/wine-box64-compat.patch" ]; then
+            patch -p1 --forward < "$WS/wine-box64-compat.patch" || echo "  box64-compat 跳过"
+          fi
+
+          # 5.9 补丁残留检查
+          if find . -name '*.rej' | grep -q .; then
+            echo "⚠️ 有 .rej:"; find . -name '*.rej'
+          fi
+
+          # ============================================================
+          # 6. Regenerate configure
+          # ============================================================
+          echo "===== [6/9] autoreconf ====="
+          if [ -x ./autogen.sh ]; then
+            NOCONFIGURE=1 ./autogen.sh || ./autogen.sh
+          elif [ -f configure.ac ]; then
+            autoreconf -fiv
+          fi
+          [ -x ./configure ] || { echo "❌ configure 未生成"; exit 1; }
+          bash configure --help >/dev/null 2>&1 || true
+
+          # ============================================================
+          # 7. native Wine tools (x86_64 host) + NLS
+          # ============================================================
+          echo "===== [7/9] native tools + NLS ====="
+          rm -rf "$NATIVE"; mkdir -p "$NATIVE"
+          NATIVE_BUILD=/opt/wine-native-build
+          rm -rf "$NATIVE_BUILD"; mkdir -p "$NATIVE_BUILD"
+          cd "$NATIVE_BUILD"
+          export CC=gcc CXX=g++
+          "$SRC/source/configure" \
+            --enable-win64 --disable-tests --without-x --without-vulkan --without-wayland \
+            --without-pulse --without-alsa --without-dbus --without-udev --without-cups \
+            --without-gphoto --without-gssapi --without-krb5 --without-pcap --without-pcsclite \
+            --without-sane --without-usb --without-v4l2 --without-ffmpeg --without-gstreamer \
+            || { echo "❌ native configure 失败"; exit 1; }
+          make __tooldeps__ -j"$JOBS"
+          make -C nls -j"$JOBS"
+          NLS_BACKUP=/opt/nls-backup
+          rm -rf "$NLS_BACKUP"; mkdir -p "$NLS_BACKUP"
+          cp -a nls/*.nls "$NLS_BACKUP/" 2>/dev/null || true
+          test -f "$NATIVE_BUILD/tools/winebuild/winebuild" && echo "✅ winebuild ok"
+          ls -la "$NLS_BACKUP" | head
+
+          echo "✅ 阶段 4-7 完成"
+
+          # ============================================================
+          # 8. Configure + build ARM64 WOW64
+          # ============================================================
+          echo "===== [8/9] configure ARM64 ($WINE_ARCHS) ====="
+          rm -rf "$BUILD"; mkdir -p "$BUILD"
+          cd "$BUILD"
+          export PATH="${LLVM_MINGW}/bin:$PATH"
+          export LD_LIBRARY_PATH="${LLVM_MINGW}/lib:${LLVM_MINGW}/lib/clang/lib:${LD_LIBRARY_PATH:-}"
+
+          export CC="aarch64-linux-gnu-gcc"
+          export CXX="aarch64-linux-gnu-g++"
+          export CROSSCC="arm64ec-w64-mingw32-clang"
+          export CROSSCXX="arm64ec-w64-mingw32-clang++"
+
+          # arm64ec 缓存变量：跳过编译期探测（交叉无法运行）
+          export ac_cv_arm64ec_crosscc=yes
+          export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__subsystem_console__Wl__WX=yes
+          export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__no_default_config=yes
+
+          # arm64 sysroot（best-effort；找不到就 --without-x 等）
+          ARM64_LIBDIR="${ARM64_SYSROOT}/usr/lib/aarch64-linux-gnu"
+          if [ -d "$ARM64_LIBDIR" ]; then
+            export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig:${ARM64_SYSROOT}/usr/share/pkgconfig"
+            export PKG_CONFIG_LIBDIR="${ARM64_LIBDIR}/pkgconfig:${ARM64_SYSROOT}/usr/share/pkgconfig"
+            XFLAGS="--with-x"
+            VKFLAGS="--with-vulkan"
+          else
+            export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            export PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            XFLAGS="--without-x"
+            VKFLAGS="--without-vulkan"
+            echo "ℹ️ 无 arm64 sysroot → $XFLAGS $VKFLAGS"
+          fi
+
+          export CFLAGS="-O2 -pipe"
+          export CXXFLAGS="-O2 -pipe"
+          export CROSSCFLAGS="-O2 -pipe"
+          export CROSSCXXFLAGS="-O2 -pipe"
+          export LDFLAGS="-Wl,-O1 -Wl,--as-needed"
+
+          set -x
+          "$SRC/source/configure" \
+            --enable-win64 \
+            --host=aarch64-linux-gnu \
+            --with-mingw=clang \
+            --enable-archs="$WINE_ARCHS" \
+            --with-wine-tools="$NATIVE_BUILD" \
+            --prefix="$PREFIX" \
+            --disable-win16 --disable-opencl --disable-tests --disable-winemenubuilder \
+            --enable-nls --with-pthread --without-ffmpeg \
+            $XFLAGS $VKFLAGS \
+            --with-pulse --without-oss --with-alsa --without-cups --without-gphoto \
+            --without-gssapi --without-krb5 --without-pcap --without-pcsclite \
+            --without-sane --without-usb --without-v4l2 --without-dbus --without-udev \
+            --without-gstreamer \
+            2>&1 | tail -120 || { echo "❌ configure 失败"; tail -60 config.log; exit 1; }
+          set +x
+
+          test -f config.status || { echo "❌ 无 config.status"; tail -80 config.log; exit 1; }
+          echo "===== configure summary ====="
+          grep -E '^  (Architecture|Wine version|Host CPU|Cross|NLS|X11|Vulkan)' config.log 2>/dev/null | head -20 || true
+
+          echo "===== make -j$JOBS ====="
+          make -j"$JOBS" 2>&1 | tee /tmp/wine-arm64-build.log | tail -60
+          echo "===== make install ====="
+          make install 2>&1 | tail -30
+
+          # ---- NLS 兜底 ----
+          if [ -d "$NLS_BACKUP" ]; then
+            for d in "$PREFIX"/share/wine/nls "$PREFIX"/lib/wine/nls; do
+              mkdir -p "$d" 2>/dev/null || true
+              cp -a "$NLS_BACKUP"/*.nls "$d/" 2>/dev/null || true
+            done
+          fi
+
+          # ============================================================
+          # 8b. FEX 模拟器 DLL（可选）
+          # ============================================================
+          if [ "$BUILD_FEX" = "true" ]; then
+            echo "===== [8b] 编译 FEX ====="
+            FEX_SRC=/opt/fex-src
+            rm -rf "$FEX_SRC"
+            git clone --depth=1 --branch "$FEX_REF" --recurse-submodules --shallow-submodules \
+              "https://github.com/${FEX_REPO}.git" "$FEX_SRC" || {
+              echo "⚠️ FEX clone 失败，跳过"; BUILD_FEX=false; }
+          fi
+          if [ "$BUILD_FEX" = "true" ]; then
+            export PATH="${LLVM_MINGW}/bin:$PATH"
+            cd "$FEX_SRC"
+            mkdir -p build_ec build_pe
+            # x86_64 模拟 → libarm64ecfex.dll
+            cd build_ec
+            cmake -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE=../Data/CMake/toolchain_mingw.cmake \
+              -DENABLE_LTO=False -DENABLE_ASSERTIONS=False \
+              -DTUNE_ARCH=generic -DTUNE_CPU=none \
+              -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
+              -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
+              .. > /tmp/fex-ec-cmake.log 2>&1 || { echo "⚠️ FEX ec cmake 失败"; tail -30 /tmp/fex-ec-cmake.log; }
+            make -j"$JOBS" arm64ecfex > /tmp/fex-ec-make.log 2>&1 || { echo "⚠️ FEX ec make 失败"; tail -30 /tmp/fex-ec-make.log; }
+            ARM64EC_DLL=$(find "$FEX_SRC" -name 'libarm64ecfex.dll' 2>/dev/null | head -1)
+            # i386 模拟 → libwow64fex.dll
+            cd "$FEX_SRC/build_pe"
+            cmake -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE=../Data/CMake/toolchain_mingw.cmake \
+              -DENABLE_LTO=False -DENABLE_ASSERTIONS=False \
+              -DTUNE_ARCH=generic -DTUNE_CPU=none \
+              -DMINGW_TRIPLE=aarch64-w64-mingw32 \
+              -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
+              .. > /tmp/fex-pe-cmake.log 2>&1 || { echo "⚠️ FEX pe cmake 失败"; tail -30 /tmp/fex-pe-cmake.log; }
+            make -j"$JOBS" wow64fex > /tmp/fex-pe-make.log 2>&1 || { echo "⚠️ FEX pe make 失败"; tail -30 /tmp/fex-pe-make.log; }
+            WOW64_DLL=$(find "$FEX_SRC" -name 'libwow64fex.dll' 2>/dev/null | head -1)
+            echo "ARM64EC_DLL=$ARM64EC_DLL"
+            echo "WOW64_DLL=$WOW64_DLL"
+            if [ -n "$ARM64EC_DLL" ] || [ -n "$WOW64_DLL" ]; then
+              DEST="$PREFIX/lib/wine/aarch64-windows"
+              mkdir -p "$DEST" "$PREFIX/share/fex-emu/HostThunks" "$PREFIX/share/fex-emu/GuestThunks" "$PREFIX/share/fex-emu/RootFS"
+              [ -n "$ARM64EC_DLL" ] && cp -f "$ARM64EC_DLL" "$DEST/"
+              [ -n "$WOW64_DLL" ] && cp -f "$WOW64_DLL" "$DEST/"
+              for t in "$FEX_SRC"/Data/*/Thunks/*; do [ -e "$t" ] && cp -a "$t" "$PREFIX/share/fex-emu/HostThunks/" 2>/dev/null || true; done
+              cat > "$PREFIX/share/fex-emu/fex-env.sh" <<'FEXENV'
+          # FEX 运行环境（source 本文件）
+          export FEX_THUNKHOSTLIBS="${FEX_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}/HostThunks"
+          export FEX_THUNKGUESTLIBS="${FEX_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}/GuestThunks"
+          export FEX_ROOTFS="${FEX_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}/RootFS"
+          export FEX_THUNKCONFIG="${FEX_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}/ThunkConfig.json"
+          export FEX_PORTABLE=1
+          export HODLL64=libarm64ecfex.dll
+          export HODLL=libwow64fex.dll
+          FEXENV
+              chmod 0755 "$PREFIX/share/fex-emu/fex-env.sh"
+              echo "✅ FEX DLL 已安装到 $DEST"
+              ls -la "$DEST"
+            else
+              echo "⚠️ 未产出 FEX DLL，跳过安装"
+            fi
+          fi
+
+          echo "✅ 阶段 8 完成"
+
+          # ============================================================
+          # 9. 瘦身 + 打包
+          # ============================================================
+          echo "===== [9/9] 打包 ====="
+          find "$PREFIX" -type f \( -name '*.a' -o -name '*.la' \) -delete 2>/dev/null || true
+          find "$PREFIX" -type f \( -name '*.debug' -o -name '*.dwo' \) -delete 2>/dev/null || true
+          rm -rf "$PREFIX/include" "$PREFIX/share/man" "$PREFIX/share/doc" 2>/dev/null || true
+
+          # Termux runtime path（可选；仅当目标为 termux）
+          if [ -d "$PREFIX/bin" ]; then
+            for b in "$PREFIX"/bin/wine*; do
+              [ -f "$b" ] || continue
+              case "$(file -b "$b" 2>/dev/null)" in
+                *ELF*aarch64*) : ;;
+                *) continue ;;
+              esac
+            done || true
+          fi
+
+          rm -rf /tmp/pkg
+          mkdir -p "/tmp/pkg/${BUILD_NAME}"
+          cp -a "$PREFIX/." "/tmp/pkg/${BUILD_NAME}/"
+          {
+            echo "build_name     : $BUILD_NAME"
+            echo "wine_branch    : $WINE_BRANCH"
+            echo "archs          : $WINE_ARCHS"
+            echo "host           : $(uname -m)"
+            echo "cc (unix)      : $(aarch64-linux-gnu-gcc --version | head -1)"
+            echo "cc (pe)        : $(arm64ec-w64-mingw32-clang --version | head -1)"
+            echo "wine_commit    : $WINE_COMMIT"
+            echo "39bit va       : $ENABLE_39BIT"
+            echo "noexec fallback: $ENABLE_NOEXEC"
+            echo "fex built      : $BUILD_FEX"
+            echo "built at (UTC) : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "/tmp/pkg/${BUILD_NAME}/BUILD_INFO.txt"
+
+          cd /tmp/pkg
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -cJf "/tmp/${BUILD_NAME}.tar.xz" "${BUILD_NAME}"
+          sha256sum "/tmp/${BUILD_NAME}.tar.xz" > /tmp/checksums.txt
+          echo "$BUILD_NAME" > /tmp/BUILD_NAME.txt
+
+          mkdir -p /tmp/wt-out
+          cp -f "/tmp/${BUILD_NAME}.tar.xz" /tmp/wt-out/
+          cp -f /tmp/checksums.txt /tmp/wt-out/
+          cp -f /tmp/BUILD_NAME.txt /tmp/wt-out/
+
+          echo "=============================================="
+          echo " ✅ 构建完成: $BUILD_NAME"
+          ls -la "/tmp/${BUILD_NAME}.tar.xz"
+          echo "=============================================="
+
+          ARMT
+          echo "✅ template 就位: $(sudo wc -l < /tmp/archlinux/tmp/arm64-build.sh.tpl) lines"
+
+      - name: Write build script
+        env:
+          IN_WINE_BRANCH: ${{ inputs.wine_branch || 'proton' }}
+          IN_WINE_VERSION: ${{ inputs.wine_version || 'latest' }}
+          IN_PROTON_BRANCH: ${{ inputs.proton_branch || 'proton_11.0' }}
+          IN_PROTON_COMMIT: ${{ inputs.proton_commit || '' }}
+          IN_GN_BRANCH: ${{ inputs.gamenative_branch || 'proton_11.0-2' }}
+          IN_VALVE_REPO: ${{ inputs.valve_repo || 'https://github.com/ValveSoftware/wine.git' }}
+          IN_VALVE_BRANCH: ${{ inputs.valve_branch || 'experimental_10.0' }}
+          IN_STAGING_VER: ${{ inputs.staging_version || '' }}
+          IN_WINE_ARCHS: ${{ inputs.wine_archs || 'arm64ec,aarch64,i386' }}
+          IN_LLVM_REPO: ${{ inputs.llvm_mingw_repo || 'mstorsjo/llvm-mingw' }}
+          IN_LLVM_DATE: ${{ inputs.llvm_mingw_date || '20251202' }}
+          IN_LLVM_NAME: ${{ inputs.llvm_mingw_name || '' }}
+          IN_39BIT: ${{ inputs.enable_39bit_va || 'true' }}
+          IN_NOEXEC: ${{ inputs.enable_noexec_fallback || 'true' }}
+          IN_BUILD_FEX: ${{ inputs.build_fex || 'true' }}
+          IN_FEX_REPO: ${{ inputs.fex_repo || 'AndreRH/FEX' }}
+          IN_FEX_REF: ${{ inputs.fex_ref || 'arm64ec' }}
+        run: |
+          set -e
+          python3 - "$GITHUB_WORKSPACE" <<'PYGEN'
+          import os, sys, textwrap
+          ws = sys.argv[1]
+          m = {
+              "@@WINE_BRANCH@@": os.environ["IN_WINE_BRANCH"],
+              "@@WINE_VERSION@@": os.environ["IN_WINE_VERSION"],
+              "@@PROTON_BRANCH@@": os.environ["IN_PROTON_BRANCH"],
+              "@@PROTON_COMMIT@@": os.environ["IN_PROTON_COMMIT"],
+              "@@GN_BRANCH@@": os.environ["IN_GN_BRANCH"],
+              "@@VALVE_REPO@@": os.environ["IN_VALVE_REPO"],
+              "@@VALVE_BRANCH@@": os.environ["IN_VALVE_BRANCH"],
+              "@@STAGING_VER@@": os.environ["IN_STAGING_VER"],
+              "@@WINE_ARCHS@@": os.environ["IN_WINE_ARCHS"],
+              "@@LLVM_REPO@@": os.environ["IN_LLVM_REPO"],
+              "@@LLVM_DATE@@": os.environ["IN_LLVM_DATE"],
+              "@@LLVM_NAME@@": os.environ["IN_LLVM_NAME"],
+              "@@39BIT@@": os.environ["IN_39BIT"],
+              "@@NOEXEC@@": os.environ["IN_NOEXEC"],
+              "@@BUILD_FEX@@": os.environ["IN_BUILD_FEX"],
+              "@@FEX_REPO@@": os.environ["IN_FEX_REPO"],
+              "@@FEX_REF@@": os.environ["IN_FEX_REF"],
+          }
+          tpl = open("/tmp/arm64-build.sh.tpl").read()
+          for k, v in m.items():
+              tpl = tpl.replace(k, v)
+          open("/tmp/arm64-build.sh", "w").write(tpl)
+          print("injected ok")
+          PYGEN
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: bcc-arch-arm64-ccache-${{ inputs.wine_branch || 'proton' }}
+          restore-keys: |
+            bcc-arch-arm64-ccache-
+
+      - name: Compile in BCC Arch chroot
+        run: |
+          set -e
+          cd /tmp
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          set +e
+          timeout 12600 sudo chroot archlinux /bin/arm64-build.sh
+          RC=$?
+          set -e
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+          if [ $RC -ne 0 ]; then
+            echo "❌ chroot 构建失败，RC=$RC"
+            echo "--- arm64-build 日志尾部 ---"
+            tail -100 /tmp/archlinux/tmp/wine-arm64-build.log 2>/dev/null || true
+            exit $RC
+          fi
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: bcc-arch-arm64-ccache-${{ inputs.wine_branch || 'proton' }}-${{ github.run_id }}
+
+      - name: Collect artifacts
+        run: |
+          set -e
+          ls -la "$OUT_DIR"
+          NAME=$(cat "$OUT_DIR/BUILD_NAME.txt")
+          echo "BUILD_NAME=$NAME" >> "$GITHUB_ENV"
+          mkdir -p /tmp/artifacts
+          cp "$OUT_DIR"/*.tar.xz "$OUT_DIR"/checksums.txt /tmp/artifacts/
+          ls -la /tmp/artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: /tmp/artifacts/*
+          retention-days: 30
+
+      - name: Publish Release
+        if: ${{ inputs.publish_release != 'false' }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.BUILD_NAME }}
+          name: ${{ env.BUILD_NAME }}
+          body: |
+            Wine ARM64 WOW64 (arm64ec) — BCC Arch chroot build
+
+            | 项目 | 值 |
+            |---|---|
+            | build | `${{ env.BUILD_NAME }}` |
+            | wine_branch | `${{ inputs.wine_branch || 'proton' }}` |
+            | archs | `${{ inputs.wine_archs || 'arm64ec,aarch64,i386' }}` |
+            | 环境 | BCC Arch Linux chroot + aarch64-linux-gnu cross + llvm-mingw |
+            | 39-bit VA | `${{ inputs.enable_39bit_va || 'true' }}` |
+            | noexec | `${{ inputs.enable_noexec_fallback || 'true' }}` |
+            | FEX | `${{ inputs.build_fex || 'true' }}` |
+            | workflow | `${{ github.sha }}` |
+            | run | #${{ github.run_number }} |
+          files: |
+            /tmp/artifacts/*.tar.xz
+            /tmp/artifacts/checksums.txt
+          draft: false
+          prerelease: false
