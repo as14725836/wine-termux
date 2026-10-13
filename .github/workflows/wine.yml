@@ -316,6 +316,7 @@ jobs:
               [libunwind-dev]="libu/libunwind"
               [libvulkan-dev]="v/vulkan-loader"
               [libwayland-dev]="w/wayland"
+              [x11proto-dev]="x/xorgproto"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -351,7 +352,7 @@ jobs:
               sub="${DEBPKG[$pkg]}"
               # 列 pool 目录，找 <pkg>_<ver>_arm64.deb
               idx="${MIRROR}/pool/main/${sub}/"
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | sort -V | tail -1) || true
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | sort -V | tail -1) || true
               if [ -z "$deb" ]; then
                 echo "  ⚠️ 未找到 $pkg (arm64)"
                 continue
@@ -374,7 +375,7 @@ jobs:
             for pkg in "${!RUNPKG[@]}"; do
               sub="${RUNPKG[$pkg]}"
               idx="${MIRROR}/pool/main/${sub}/"
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | grep -v 'dbgsym' | sort -V | tail -1)
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | grep -v 'dbgsym' | sort -V | tail -1)
               if [ -z "$deb" ]; then echo "  ⚠️ runtime 未找到 $pkg"; continue; fi
               if curl -fsL -o "$deb" "${idx}${deb}"; then
                 _td=$(mktemp -d)
