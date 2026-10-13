@@ -680,7 +680,6 @@ jobs:
           export FREETYPE_CFLAGS="-I/usr/aarch64-linux-gnu/include/freetype2"
           export FONTCONFIG_CFLAGS="-I/usr/aarch64-linux-gnu/include"
           export FONTCONFIG_LIBS="-lfontconfig"
-          export LIBS="-lz -lbz2 -lpng16 -lbrotlidec -lharfbuzz -lexpat -luuid"
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__subsystem_console__Wl__WX=yes
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__no_default_config=yes
 
@@ -705,7 +704,6 @@ jobs:
           export CFLAGS="-O2 -pipe -I/usr/aarch64-linux-gnu/include/freetype2 -I/usr/aarch64-linux-gnu/include/libpng16"
           # 交叉链接 freetype 需要显式带上它的依赖链
           export LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
-          export FREETYPE_LIBS="-lfreetype -lz -lbz2 -lpng16 -lbrotlidec -lharfbuzz"
           export CXXFLAGS="$CFLAGS"
           export CROSSCFLAGS="-O2 -pipe"
           export CROSSCXXFLAGS="-O2 -pipe"
