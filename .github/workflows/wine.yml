@@ -729,7 +729,9 @@ jobs:
           echo "=============================================="
 
           ARMT
-          echo "✅ template 就位: $(sudo wc -l < /tmp/archlinux/tmp/arm64-build.sh.tpl) lines"
+          sudo cp -f /tmp/archlinux/tmp/arm64-build.sh.tpl /tmp/arm64-build.sh.tpl
+          sudo chown "$(id -u):$(id -g)" /tmp/arm64-build.sh.tpl
+          echo "✅ template 就位: $(wc -l < /tmp/arm64-build.sh.tpl) lines"
 
       - name: Write build script
         env:
