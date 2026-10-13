@@ -1849,18 +1849,171 @@ def fetch_catalog(force=False, timeout=25):
     raise RuntimeError("拿不到组件目录：%s" % last)
 
 
-def component_size(c):
-    """组件大概要下多少字节。"""
-    total = 0
-    for s in c.get("steps") or []:
-        u = s.get("url") or ""
-        if not u.startswith("http"):
+def _step_sizes(step):
+    """从一步里挖出所有 (url, size)。
+
+    目录里 url/size 放的地方不统一，都得照顾到：
+      - step.url / step.file_size
+      - step.mirror
+      - step.environment.url / step.environment.file_size   (install_exe)
+      - step.files[].url / step.files[].file_size
+    """
+    if not isinstance(step, dict):
+        return
+    env = step.get("environment") if isinstance(step.get("environment"), dict) else {}
+    cands = [
+        (step.get("url"), step.get("file_size")),
+        (step.get("mirror"), step.get("file_size")),
+        (env.get("url"), env.get("file_size") or step.get("file_size")),
+    ]
+    for f in step.get("files") or []:
+        if isinstance(f, dict):
+            cands.append((f.get("url"), f.get("file_size")))
+    seen = set()
+    for u, sz in cands:
+        if not u or not str(u).startswith("http"):
             continue
-        try:
-            total = max(total, int(s.get("file_size") or 0))
-        except (TypeError, ValueError):
-            pass
+        if u in seen:
+            continue
+        seen.add(u)
+        yield u, _to_int(sz)
+
+
+def component_size(c):
+    """组件大概要下多少字节（取各 URL 里最大的那个 + 其余之和的近似）。
+
+    同一步里 mirror 和 url 指向同一个文件，不能重复算 —— 用 url 去重。
+    """
+    if not isinstance(c, dict):
+        return 0
+    total = 0
+    for st in c.get("steps") or []:
+        best = 0
+        for _u, sz in _step_sizes(st):
+            best = max(best, sz)
+        total += best
     return total
+
+
+def component_size_known(c):
+    """返回 (已知大小, 未知大小) 的字节数 —— 用来判断能不能显示具体数字。"""
+    if not isinstance(c, dict):
+        return 0, 0
+    known = unknown = 0
+    for st in c.get("steps") or []:
+        items = list(_step_sizes(st))
+        if not items:
+            continue
+        sz = max(s for _u, s in items)
+        if sz:
+            known += sz
+        else:
+            unknown += 1
+    return known, unknown
+
+
+def _sizes_cache_file():
+    return Path(os.environ.get("WC_CACHE", Path.home() / ".cache/wincomponents")) / "sizes.json"
+
+
+def load_size_cache():
+    """磁盘上的 {组件名/url: 字节数} 缓存。"""
+    try:
+        d = json.loads(Path(_sizes_cache_file()).read_text())
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_size_cache(d):
+    try:
+        fp = Path(_sizes_cache_file())
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(json.dumps(d))
+    except Exception:
+        pass
+
+
+def _head_len(url, timeout=8):
+    """HEAD 一下拿 Content-Length。拿不到返回 0。"""
+    req = urllib.request.Request(url, method="HEAD",
+                                 headers={"User-Agent": "wincomponents/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _to_int(r.headers.get("Content-Length"))
+    except Exception:
+        return 0
+
+
+def size_for(comp, cache=None):
+    """组件显示用的大小：先看磁盘缓存，再看目录里的 file_size。"""
+    if not isinstance(comp, dict):
+        return 0
+    cache = cache if cache is not None else load_size_cache()
+    name = comp.get("name") or ""
+    if name and cache.get(name):
+        return _to_int(cache[name])
+    return component_size(comp)
+
+
+def fill_sizes(comps, cache=None, workers=16, on_one=None, timeout=8):
+    """把目录里缺的 file_size 用 HEAD 补齐，补到的写进缓存。
+
+    on_one(name, size) 每补到一个回调一次（界面刷新用）。
+    返回更新后的缓存 dict。
+    """
+    cache = cache if cache is not None else load_size_cache()
+    # 挑出还缺大小的 (name, url) —— 优先用镜像，直连在国内会超时
+    todo = []
+    for c in comps:
+        name = c.get("name") or ""
+        if not name or cache.get(name):
+            continue
+        if component_size(c):          # 目录里已经写了，不用探
+            continue
+        urls = list(_step_sizes_steps(c))
+        if urls:
+            todo.append((name, urls[0]))
+    if not todo:
+        return cache
+
+    import threading
+    lock = threading.Lock()
+
+    def work():
+        while True:
+            with lock:
+                if not todo:
+                    return
+                name, url = todo.pop(0)
+            got = 0
+            for u in _fast_candidates(url):
+                got = _head_len(u, timeout=timeout)
+                if got:
+                    break
+            if got:
+                with lock:
+                    cache[name] = got
+                if on_one:
+                    try:
+                        on_one(name, got)
+                    except Exception:
+                        pass
+
+    ts = [threading.Thread(target=work, daemon=True) for _ in range(min(workers, len(todo)))]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    save_size_cache(cache)
+    return cache
+
+
+def _step_sizes_steps(c):
+    """组件里所有带 url 的步骤 -> 逐个 yield url。"""
+    for st in c.get("steps") or []:
+        for u, _sz in _step_sizes(st):
+            yield u
 
 
 def component_kind(c):
@@ -2420,6 +2573,10 @@ class ComponentCard(QPushButton):
         if host is not None:
             host._hide_hover_tip()
 
+    def set_size(self, size):
+        """后台探到真实大小后更新（重绘由调用方触发）。"""
+        self.size_bytes = _to_int(size)
+
     def set_width(self, w):
         """由布局按列数算出来的宽度。"""
         w = int(w)
@@ -2508,14 +2665,16 @@ class ComponentCard(QPushButton):
             rc = QRectF(r.left() + pad, r.top() + 34, r.width() - 2 * pad, 20)
             p.drawText(rc, Qt.AlignLeft | Qt.AlignVCenter, self._elide(p, sub, rc.width()))
 
-        if self.size_bytes:
-            f4 = QFont(self.font())
-            f4.setPointSizeF(9)
-            p.setFont(f4)
-            p.setPen(QColor(0x7e, 0x9c, 0xc0) if self.isEnabled() else QColor(0x60, 0x68, 0x78))
-            sz = _human_size(self.size_bytes)
-            rc2 = QRectF(r.left() + pad, r.bottom() - 24, r.width() - 2 * pad, 18)
-            p.drawText(rc2, Qt.AlignLeft | Qt.AlignVCenter, sz)
+        # 左下角：大小。未知也占个位（"--"），免得卡片高矮不一
+        f4 = QFont(self.font())
+        f4.setPointSizeF(9)
+        p.setFont(f4)
+        known = bool(self.size_bytes)
+        p.setPen(QColor(0x7e, 0x9c, 0xc0) if (self.isEnabled() and known)
+                 else QColor(0x60, 0x68, 0x78))
+        sz = _human_size(self.size_bytes) if known else "--"
+        rc2 = QRectF(r.left() + pad, r.bottom() - 24, r.width() - 2 * pad, 18)
+        p.drawText(rc2, Qt.AlignLeft | Qt.AlignVCenter, sz)
 
     @staticmethod
     def _elide(painter, text, width):
@@ -2848,6 +3007,7 @@ class WinComponentsDialog(QDialog):
         self._drag_pos = None
         self._press_obj = None
         self._press_pos = None
+        self._size_cache = {}
         self._drag_start_global = None
         self._dragging = False
         self._server = None
@@ -2994,12 +3154,6 @@ class WinComponentsDialog(QDialog):
             row_cfg.addWidget(b)
         row_cfg.addStretch()
 
-        delb = QPushButton("删除…")
-        delb.setObjectName("delBtn")
-        self._attach_hover_tip(delb, "勾选要删掉的包（可多选）后一次性删除")
-        delb.clicked.connect(self._delete_multi)
-        row_cfg.addWidget(delb)
-
         cancel = QPushButton("取消")
         cancel.setObjectName("cancelBtn")
         cancel.clicked.connect(self.reject)
@@ -3132,6 +3286,51 @@ class WinComponentsDialog(QDialog):
         """居中交给 QScrollArea 的 alignment 做，不碰 viewportMargins。"""
         self.scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
+    def _start_size_probe(self):
+        """后台用 HEAD 把目录里缺的 file_size 补全，补到就更新卡片。
+
+        只在第一次真拿到目录后跑一次 —— 搜索、切版本都不重跑。
+        """
+        if getattr(self, "_size_probe_done", False) or not self.catalog:
+            return
+        self._size_probe_done = True
+        self._size_cache = load_size_cache()
+        # 磁盘缓存已经有值的，先直接刷上（不用等网络）
+        self._refresh_cards_size()
+
+        def one(name, size):
+            # 后台线程 -> 主线程：只更新那一张卡片
+            QTimer.singleShot(0, lambda n=name, s=size: self._set_card_size(n, s))
+
+        def work():
+            try:
+                fill_sizes(self.catalog, cache=self._size_cache, on_one=one)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_card_size(self, name, size):
+        card = self._card_by_name(name)
+        if card is not None:
+            card.set_size(size)
+            card.update()
+            # tooltip 里的大小也一起换掉
+            txt = getattr(card, "_tip_text", "")
+            if "大小 未知" in txt:
+                card.set_tip_text(txt.replace("大小 未知（正在探测…）",
+                                              "大小 " + human_size(size)))
+
+    def _refresh_cards_size(self):
+        for i in range(self.flow.count()):
+            w = self.flow.itemAt(i).widget()
+            if w is None or not hasattr(w, "comp_name"):
+                continue
+            sz = self._size_cache.get(w.comp_name)
+            if sz:
+                w.set_size(_to_int(sz))
+
     def _filter(self, text):
         while self.flow.count():
             item = self.flow.takeAt(0)
@@ -3155,7 +3354,7 @@ class WinComponentsDialog(QDialog):
             if low and low not in blob:
                 continue
             shown += 1
-            size = component_size(c)
+            size = size_for(c, self._size_cache)
             dlls = component_dlls(c)
             inst = name in self._installed
             card = ComponentCard(name, dlls=dlls, installed=inst,
@@ -3166,6 +3365,8 @@ class WinComponentsDialog(QDialog):
                 tip += "\n" + _wrap(desc, 34)
             if size:
                 tip += "\n大小 " + human_size(size)
+            elif kind == "file":
+                tip += "\n大小 未知（正在探测…）"
             if dlls:
                 head = ", ".join(dlls) if len(dlls) <= 8 else ", ".join(dlls[:8]) + " 等 %d 个" % len(dlls)
                 tip += "\n装这些：" + _wrap(head, 34)
@@ -3180,6 +3381,7 @@ class WinComponentsDialog(QDialog):
 
         self._max_btn_w = maxw
         self._cols = None                 # 卡片重建了 -> 列数要重算
+        self._start_size_probe()          # 目录里没写大小的，后台补齐
         if count:
             extra = "　·　还有 %d 个需要 Windows 安装器" % skipped if skipped else ""
             src_txt = {"cache": "本地缓存", "net": "在线"}.get(self.catalog_src, self.catalog_src)
