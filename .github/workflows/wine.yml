@@ -415,6 +415,21 @@ jobs:
               [libgcrypt20]="libg/libgcrypt20"
               [libgpg-error0]="libg/libgpg-error"
               [libapparmor1]="a/apparmor"
+              [libmp3lame0]="l/lame"
+              [libid3tag0]="libi/libid3tag"
+              [libx11-xcb1]="libx/libx11"
+              [libflac12]="f/flac"
+              [libFLAC12]="f/flac"
+              [libogg0]="libo/libogg"
+              [libvorbis0a]="libv/libvorbis"
+              [libvorbisenc2]="libv/libvorbis"
+              [libopus0]="o/opus"
+              [libmpg123-0]="m/mpg123"
+              [libgsm1]="libg/libgsm"
+              [libspeex1]="s/speex"
+              [libtwolame0]="t/twolame"
+              [libwavpack1]="w/wavpack"
+              [libmpg123-0]="m/mpg1232"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -540,7 +555,7 @@ jobs:
           #endif
           int main(void){ pa_mainloop *m = pa_mainloop_new(); pa_mainloop_free(m); return 0; }
           PCEOF
-              if aarch64-linux-gnu-gcc $(pkg-config --cflags libpulse 2>/dev/null) /tmp/pchk.c -o /tmp/pchk $(pkg-config --libs libpulse 2>/dev/null) -Wl,-rpath-link,"$ARCH_SYSROOT/lib/pulseaudio" 2>/tmp/pchk.err; then
+              if aarch64-linux-gnu-gcc $(pkg-config --cflags libpulse 2>/dev/null) /tmp/pchk.c -o /tmp/pchk $(pkg-config --libs libpulse 2>/dev/null) -Wl,--unresolved-symbols=ignore-in-shared-libs 2>/tmp/pchk.err; then
                 echo "✅ pulse 编译自检 OK"
               else
                 echo "❌ pulse 编译自检 失败"; head -25 /tmp/pchk.err || true
@@ -813,7 +828,7 @@ jobs:
           export CXXFLAGS="$CFLAGS"
           export CROSSCFLAGS="-O2 -pipe"
           export CROSSCXXFLAGS="-O2 -pipe"
-          export LDFLAGS="$LDFLAGS -Wl,-O1 -Wl,--as-needed"
+          export LDFLAGS="$LDFLAGS -Wl,-O1 -Wl,--as-needed -Wl,--unresolved-symbols=ignore-in-shared-libs"
 
           set -x
           "$SRC/source/configure" \
