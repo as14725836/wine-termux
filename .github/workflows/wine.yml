@@ -317,6 +317,9 @@ jobs:
               [libvulkan-dev]="v/vulkan-loader"
               [libwayland-dev]="w/wayland"
               [x11proto-dev]="x/xorgproto"
+              [zlib1g-dev]="z/zlib"
+              [libbz2-dev]="b/bzip2"
+              [libbrotli-dev]="b/brotli"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -360,6 +363,16 @@ jobs:
               [libuuid1]="u/util-linux"
               [libselinux1]="libs/libselinux"
               [libpcre2-16-0]="p/pcre2"
+              [zlib1g]="z/zlib"
+              [libbz2-1.0]="b/bzip2"
+              [libbrotli1]="b/brotli"
+              [libbrotli-dev]="b/brotli"
+              [libharfbuzz0b]="h/harfbuzz"
+              [libgraphite2-3]="g/graphite2"
+              [libicu72]="i/icu"
+              [libpng16-16]="libp/libpng1.6"
+              [libjpeg62-turbo]="libj/libjpeg-turbo"
+              [libbrotli1]="b/brotli"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -446,6 +459,18 @@ jobs:
                 echo "❌ 链接自检: -lX11 失败"; head -20 /tmp/xchk.err || true
               fi
               ls -la "$ARCH_SYSROOT/include/X11/Xlib.h" 2>&1 | head -2 || true
+              # freetype 链接自检
+              cat > /tmp/ftchk.c <<'FTEOF'
+          #include <ft2build.h>
+          #include FT_FREETYPE_H
+          int main(void){ FT_Library l; return FT_Init_FreeType(&l); }
+          FTEOF
+              if aarch64-linux-gnu-gcc -I"$ARCH_SYSROOT/include/freetype2" /tmp/ftchk.c -o /tmp/ftchk -lfreetype 2>/tmp/ftchk.err; then
+                echo "✅ 链接自检: -lfreetype OK"
+              else
+                echo "❌ 链接自检: -lfreetype 失败"; head -30 /tmp/ftchk.err || true
+              fi
+              ls -la "$ARCH_SYSROOT"/lib64/libfreetype.so* "$ARCH_SYSROOT"/lib/libfontconfig.so* 2>&1 | head -6 || true
             fi
             touch "${ARM64_SYSROOT}/.done"
             cd /tmp
@@ -669,6 +694,9 @@ jobs:
           fi
 
           export CFLAGS="-O2 -pipe -I/usr/aarch64-linux-gnu/include/freetype2 -I/usr/aarch64-linux-gnu/include/libpng16"
+          # 交叉链接 freetype 需要显式带上它的依赖链
+          export LDFLAGS="-L/usr/aarch64-linux-gnu/lib"
+          export FREETYPE_LIBS="-lfreetype -lz -lbz2 -lpng16 -lbrotlidec -lharfbuzz"
           export CXXFLAGS="$CFLAGS"
           export CROSSCFLAGS="-O2 -pipe"
           export CROSSCXXFLAGS="-O2 -pipe"
