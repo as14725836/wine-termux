@@ -782,6 +782,9 @@ jobs:
           open("/tmp/arm64-build.sh", "w").write(tpl)
           print("injected ok")
           PYGEN
+          sudo cp -f /tmp/arm64-build.sh /tmp/archlinux/bin/arm64-build.sh
+          sudo chmod +x /tmp/archlinux/bin/arm64-build.sh
+          echo "✅ arm64-build.sh 就位: $(sudo wc -l < /tmp/archlinux/bin/arm64-build.sh) lines"
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
