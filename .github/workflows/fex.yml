@@ -200,10 +200,16 @@ jobs:
           fi
           ln -sfn "/opt/${DIR}" /opt/llvm-mingw
 
+          # bylaws llvm-mingw 动态链接 LLVM：登记 lib 路径，免得 clang 找不到 libclang-cpp.so
+          mkdir -p /etc/ld.so.conf.d
+          echo "/opt/llvm-mingw/lib" > /etc/ld.so.conf.d/llvm-mingw.conf
+          echo "/opt/llvm-mingw/lib/clang/lib" >> /etc/ld.so.conf.d/llvm-mingw.conf
+          ldconfig 2>/dev/null || true
           echo "=== 工具链自检 ==="
           for T in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang; do
             printf '%-38s ' "${T}"
-            /opt/llvm-mingw/bin/${T} --version | head -1 || echo MISSING
+            LD_LIBRARY_PATH="/opt/llvm-mingw/lib:/opt/llvm-mingw/lib/clang/lib" \
+              /opt/llvm-mingw/bin/${T} --version 2>&1 | head -1 || echo MISSING
           done
           EOS
           # chroot 不继承宿主环境变量，把 token 与 llvm-mingw 选择用 sed 烧进脚本
@@ -230,6 +236,16 @@ jobs:
           #!/bin/bash
           set -eux
           export PATH="/opt/llvm-mingw/bin:${PATH}"
+          # bylaws 版 llvm-mingw 是动态链接 LLVM 的：clang 需要 libclang-cpp.so 等，
+          # 这些库在 /opt/llvm-mingw/lib 下，chroot 里没有 ldconfig 条目 → 必须给 LD_LIBRARY_PATH
+          export LD_LIBRARY_PATH="/opt/llvm-mingw/lib:/opt/llvm-mingw/lib/clang/lib:${LD_LIBRARY_PATH:-}"
+          echo "/opt/llvm-mingw/lib" > /etc/ld.so.conf.d/llvm-mingw.conf
+          echo "/opt/llvm-mingw/lib/clang/lib" >> /etc/ld.so.conf.d/llvm-mingw.conf
+          ldconfig 2>/dev/null || true
+          echo "--- llvm-mingw 动态库清单 ---"
+          ls -1 /opt/llvm-mingw/lib/libclang-cpp.so* 2>/dev/null || echo "(无 libclang-cpp.so*)"
+          echo "--- clang 自检 ---"
+          arm64ec-w64-mingw32-clang --version | head -1 || { echo "FATAL: arm64ec clang 跑不起来"; exit 1; }
           export FEX_REPO="__FEX_REPO__"
           export FEX_REF="__FEX_REF__"
           export FEX_COMMIT=""
@@ -294,12 +310,13 @@ jobs:
 
           # ---- 兼容旧版：补 libclang_rt.builtins-arm64ec.a ----
           BUILTINS_DIR=""
-          for CAND in \
-            "$(find /opt/llvm-mingw -type d -path '*lib/clang*' -name windows -print -quit 2>/dev/null || true)" \
-            "$(dirname "$(find /opt/llvm-mingw -name 'libclang_rt.builtins-aarch64.a' -print -quit 2>/dev/null || true)")"
-          do
-            if [ -n "${CAND}" ] && [ -d "${CAND}" ]; then BUILTINS_DIR="${CAND}"; break; fi
-          done
+          _B="$(find /opt/llvm-mingw -type d -path '*lib/clang*' -name windows -print -quit 2>/dev/null || true)"
+          if [ -z "${_B}" ]; then
+            _F="$(find /opt/llvm-mingw -name 'libclang_rt.builtins-aarch64.a' -print -quit 2>/dev/null || true)"
+            if [ -n "${_F}" ]; then _B="$(dirname "${_F}")"; fi
+          fi
+          [ -n "${_B}" ] && [ -d "${_B}" ] && BUILTINS_DIR="${_B}"
+          echo "BUILTINS_DIR=${BUILTINS_DIR:-<未找到>}"
           if [ -n "${BUILTINS_DIR}" ] && [ ! -e "${BUILTINS_DIR}/libclang_rt.builtins-arm64ec.a" ] \
              && [ -e "${BUILTINS_DIR}/libclang_rt.builtins-aarch64.a" ]; then
             cp -f "${BUILTINS_DIR}/libclang_rt.builtins-aarch64.a" "${BUILTINS_DIR}/libclang_rt.builtins-arm64ec.a"
@@ -396,6 +413,14 @@ jobs:
           set -eux
           cd /tmp
           bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          # 确认 /proc 真的挂进去了（否则 cmake 探不到 cpuinfo/meminfo）
+          if [ ! -r /tmp/archlinux/proc/cpuinfo ]; then
+            echo "⚠ /proc 未挂载，重试一次"
+            sudo mount --bind /proc /tmp/archlinux/proc || true
+            sudo mount --bind /sys  /tmp/archlinux/sys  || true
+            sudo mount --bind /dev  /tmp/archlinux/dev  || true
+          fi
+          ls /tmp/archlinux/proc/cpuinfo && head -2 /tmp/archlinux/proc/cpuinfo || true
           sudo chroot archlinux /bin/build-fex.sh
           bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
           test -d /tmp/archlinux/tmp/fex-out || { echo "❌ 未找到 /tmp/fex-out"; exit 1; }
