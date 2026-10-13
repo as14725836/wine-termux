@@ -350,6 +350,15 @@ jobs:
               if [ -d "$ARM64_SYSROOT/usr/include" ]; then
                 cp -a "$ARM64_SYSROOT/usr/include/." "$ARCH_SYSROOT/include/" 2>/dev/null || true
               fi
+              # Debian 把 freetype 头放在 include/freetype2/，libpng 放在 libpng16/
+              # 探测时 gcc 不会自动加这些子目录 → 直接补链接到 include 根
+              for sub in freetype2 libpng16; do
+                if [ -d "$ARCH_SYSROOT/include/$sub" ]; then
+                  ( cd "$ARCH_SYSROOT/include/$sub" && \
+                    for h in *.h; do [ -e "$h" ] && [ ! -e "../../$h" ] && ln -sf "$sub/$h" "../../$h" 2>/dev/null; done ) || true
+                fi
+              done
+              ls -la "$ARCH_SYSROOT/include/ft2build.h" 2>&1 | head -2 || true
               if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
                 cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/." "$ARCH_SYSROOT/lib/" 2>/dev/null || true
               fi
@@ -585,8 +594,8 @@ jobs:
             echo "ℹ️ 无 arm64 sysroot → $XFLAGS $VKFLAGS"
           fi
 
-          export CFLAGS="-O2 -pipe"
-          export CXXFLAGS="-O2 -pipe"
+          export CFLAGS="-O2 -pipe -I/usr/aarch64-linux-gnu/include/freetype2 -I/usr/aarch64-linux-gnu/include/libpng16"
+          export CXXFLAGS="$CFLAGS"
           export CROSSCFLAGS="-O2 -pipe"
           export CROSSCXXFLAGS="-O2 -pipe"
           export LDFLAGS="-Wl,-O1 -Wl,--as-needed"
