@@ -946,6 +946,11 @@ jobs:
           fi
           if [ "$BUILD_FEX" = "true" ]; then
             export PATH="${LLVM_MINGW}/bin:$PATH"
+            # FEX 是 mingw 交叉目标，必须清掉为 host(arm64 linux) 交叉注入的
+            # LDFLAGS/CFLAGS/CXXFLAGS（-rpath-link、--unresolved-symbols 等会污染 lld）
+            FEX_SAVE_LDFLAGS="${LDFLAGS-}"; FEX_SAVE_CFLAGS="${CFLAGS-}"; FEX_SAVE_CXXFLAGS="${CXXFLAGS-}"
+            unset LDFLAGS CFLAGS CXXFLAGS LIBS CPPFLAGS
+            export LDFLAGS="" CFLAGS="" CXXFLAGS=""
             cd "$FEX_SRC"
             mkdir -p build_ec build_pe
             # x86_64 模拟 → libarm64ecfex.dll
@@ -957,6 +962,7 @@ jobs:
               -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
               -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
               -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
+              -DCMAKE_EXE_LINKER_FLAGS="" -DCMAKE_SHARED_LINKER_FLAGS="" -DCMAKE_MODULE_LINKER_FLAGS="" \
               .. > /tmp/fex-ec-cmake.log 2>&1 || { echo "⚠️ FEX ec cmake 失败"; tail -30 /tmp/fex-ec-cmake.log; }
             make -j"$JOBS" arm64ecfex > /tmp/fex-ec-make.log 2>&1 || { echo "⚠️ FEX ec make 失败"; tail -30 /tmp/fex-ec-make.log; }
             ARM64EC_DLL=$(find "$FEX_SRC" -name 'libarm64ecfex.dll' 2>/dev/null | head -1) || true
@@ -969,11 +975,13 @@ jobs:
               -DMINGW_TRIPLE=aarch64-w64-mingw32 \
               -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
               -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
+              -DCMAKE_EXE_LINKER_FLAGS="" -DCMAKE_SHARED_LINKER_FLAGS="" -DCMAKE_MODULE_LINKER_FLAGS="" \
               .. > /tmp/fex-pe-cmake.log 2>&1 || { echo "⚠️ FEX pe cmake 失败"; tail -30 /tmp/fex-pe-cmake.log; }
             make -j"$JOBS" wow64fex > /tmp/fex-pe-make.log 2>&1 || { echo "⚠️ FEX pe make 失败"; tail -30 /tmp/fex-pe-make.log; }
             WOW64_DLL=$(find "$FEX_SRC" -name 'libwow64fex.dll' 2>/dev/null | head -1) || true
             echo "ARM64EC_DLL=$ARM64EC_DLL"
             echo "WOW64_DLL=$WOW64_DLL"
+            export LDFLAGS="$FEX_SAVE_LDFLAGS" CFLAGS="$FEX_SAVE_CFLAGS" CXXFLAGS="$FEX_SAVE_CXXFLAGS"
             if [ -n "$ARM64EC_DLL" ] || [ -n "$WOW64_DLL" ]; then
               DEST="$PREFIX/lib/wine/aarch64-windows"
               mkdir -p "$DEST" "$PREFIX/share/fex-emu/HostThunks" "$PREFIX/share/fex-emu/GuestThunks" "$PREFIX/share/fex-emu/RootFS"
