@@ -1,0 +1,476 @@
+name: Build Wine/Proton x86_64 WoW64 (BCC Arch chroot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'wine-wow64'
+        type: choice
+        options:
+          - wine-wow64
+          - proton
+
+      proton_branch:
+        description: 'Proton 分支 (Proton 构建)'
+        required: false
+        default: 'proton_11.0'
+        type: choice
+        options:
+          - proton_11.0
+          - proton_11.0-2
+          - proton_10.0
+          - proton_9.0
+          - experimental_10.0
+          - experimental_11.0
+          - proton-9.0-arm64ec
+          - bleeding-edge
+          - main
+          - master
+
+      proton_repo:
+        description: 'Proton 源码仓库'
+        required: false
+        default: 'WinNative-Emu/proton-wine'
+        type: string
+
+      wine_branch:
+        description: 'Wine 分支'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - vanilla
+          - staging
+
+      wine_version:
+        description: 'Wine 版本，例如 11.19；latest 表示自动取最新'
+        required: false
+        default: 'latest'
+        type: string
+
+      apply_dxgi_patch:
+        description: '应用 DXGI / mfplat 补丁'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      enable_proton_mf:
+        description: '启用 Proton MF 解码'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      use_tkg:
+        description: '使用 TkG (wine-tkg-git) 构建系统（true）或直接 autotools（false）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+      publish_release:
+        description: '发布到 GitHub Release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+  schedule:
+    # 每月 5 号、20 号 UTC 02:00
+    - cron: '0 2 5,20 * *'
+
+permissions:
+  contents: write
+
+env:
+  BCC_ROOTFS_URL: https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+  # 打包产物落地目录（workflow 宿主侧可见，因为 chroot 的 / 就是 /tmp/archlinux）
+  OUT_DIR: /tmp/archlinux/tmp/wt-out
+
+jobs:
+  build-wine:
+
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 360
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------- 下载并解压 BCC Arch rootfs ----------------
+      - name: Download BCC Arch rootfs
+        run: |
+          set -e
+          cd /tmp
+          echo "📥 下载 BCC Arch rootfs ..."
+          curl -L --retry 5 --retry-delay 10 -o wine-bcc.tar.xz "$BCC_ROOTFS_URL"
+          ls -la wine-bcc.tar.xz
+          sudo tar xf wine-bcc.tar.xz
+          test -d /tmp/archlinux || { echo "❌ archlinux rootfs 未解出"; exit 1; }
+          sudo mkdir -p "$OUT_DIR"
+          echo "✅ rootfs ready"
+
+      # ---------------- 把仓库脚本拷进 chroot ----------------
+      - name: Stage scripts into chroot
+        run: |
+          set -e
+          sudo mkdir -p /tmp/archlinux/tmp/wt-scripts
+          sudo cp -r "$GITHUB_WORKSPACE"/* /tmp/archlinux/tmp/wt-scripts/ 2>/dev/null || true
+          ls -la /tmp/archlinux/tmp/wt-scripts | head -40
+
+      # ---------------- 写构建脚本到 chroot 内 ----------------
+      - name: Write build script
+        run: |
+          set -e
+          cat > /tmp/build-wine2.sh <<'EOS'
+          #!/bin/bash
+          set -e -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          export LANG=C.UTF-8
+          export LC_ALL=C.UTF-8
+          export BUILD_TYPE="__BUILD_TYPE__"
+          export PROTON_BRANCH="__PROTON_BRANCH__"
+          export PROTON_REPO="__PROTON_REPO__"
+          export WINE_BRANCH="__WINE_BRANCH__"
+          export WINE_VERSION="__WINE_VERSION__"
+          export APPLY_DXGI_PATCH="__APPLY_DXGI_PATCH__"
+          export ENABLE_PROTON_MF="__ENABLE_PROTON_MF__"
+          export USE_TKG="__USE_TKG__"
+          export WS="/tmp/wt-scripts"
+          export SRC=/tmp/wine-src
+          export PREFIX=/tmp/wine-install
+          export BUILD_DIR=/tmp/wine-build
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export GST_SYSROOT=/opt/gst-sysroot
+
+          echo "===== 环境自检 ====="
+          uname -m
+          cat /etc/os-release | head -3
+          gcc --version | head -1
+          x86_64-w64-mingw32-gcc --version | head -1 || {
+            echo "🔧 mingw-w64 缺失，安装中..."
+            pacman -Sy --noconfirm --needed mingw-w64-gcc
+            x86_64-w64-mingw32-gcc --version | head -1
+          }
+          nproc
+
+          # ---------- ccache ----------
+          mkdir -p /root/.cache/ccache
+          if [ -f /tmp/ccache.tar.xz ]; then
+            echo "✅ 使用 ccache 缓存"
+            tar xf /tmp/ccache.tar.xz -C /root/.cache/
+          fi
+          export USE_CCACHE=1
+          export CCACHE_DIR=/root/.cache/ccache
+          export PATH="/usr/lib/ccache/bin:$PATH"
+
+          # ---------- 源码 ----------
+          rm -rf "$SRC" "$BUILD_DIR" "$PREFIX"
+          mkdir -p "$SRC"
+          cd "$SRC"
+
+          if [ "$BUILD_TYPE" = "proton" ]; then
+            echo "===== Clone Proton ($PROTON_REPO @ $PROTON_BRANCH) ====="
+            git clone --depth=1 --branch "$PROTON_BRANCH" \
+              "https://github.com/${PROTON_REPO}.git" source || {
+              echo "⚠️ --branch 失败，尝试完整 clone + checkout"
+              git clone "https://github.com/${PROTON_REPO}.git" source
+              cd source && git checkout "$PROTON_BRANCH" && cd ..
+            }
+            cd source
+            git submodule update --init --recursive --depth 1 || true
+            BRANCH_DESC="$PROTON_BRANCH"
+          else
+            case "$WINE_BRANCH" in
+              vanilla)
+                echo "===== Clone vanilla wine (brunodev85/wine-10.10-custom) ====="
+                git clone https://github.com/brunodev85/wine-10.10-custom.git source
+                cd source
+                ;;
+              staging)
+                echo "===== Clone wine-mirror/wine (staging base) ====="
+                git clone https://github.com/wine-mirror/wine.git source
+                cd source
+                if [ "$WINE_VERSION" = "latest" ] || [ -z "$WINE_VERSION" ]; then
+                  WTAG=$(git tag -l 'wine-[0-9]*' | grep -E '^wine-[0-9]+\.[0-9]+$' | sort -V | tail -1)
+                  echo "自动选择最新稳定 tag: $WTAG"
+                  git checkout "$WTAG"
+                else
+                  git checkout "wine-${WINE_VERSION}" 2>/dev/null || git checkout "$WINE_VERSION"
+                fi
+                WTAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+                if [ -n "$WTAG" ] && [ "$APPLY_DXGI_PATCH" = "true" ]; then
+                  echo "===== 应用 wine-staging 补丁 ($WTAG) ====="
+                  cd /tmp
+                  rm -rf staging
+                  git clone --depth=1 --branch "$WTAG" https://github.com/wine-staging/wine-staging.git staging || \
+                    git clone --depth=1 https://github.com/wine-staging/wine-staging.git staging
+                  cd "$SRC/source"
+                  python3 /tmp/staging/staging/patchinstall.py --all --destdir=../../ || true
+                fi
+                ;;
+              *)
+                echo "❌ 未知 wine_branch: $WINE_BRANCH"; exit 1 ;;
+            esac
+            BRANCH_DESC="$WINE_BRANCH"
+          fi
+
+          cd "$SRC/source"
+
+          # ---------- Termux 环境适配 ----------
+          if [ -f "$WS/patches/termux-env/termux_env_tweaks.py" ]; then
+            echo "===== 应用 Termux 环境适配 ====="
+            python3 "$WS/patches/termux-env/termux_env_tweaks.py" "$PWD" || echo "⚠️ termux_env_tweaks 跳过"
+          fi
+          if [ -f "$WS/termux-dns-fix.patch" ]; then
+            echo "===== 应用 termux-dns-fix ====="
+            patch -p1 --forward < "$WS/termux-dns-fix.patch" || echo "⚠️ termux-dns-fix 跳过"
+          fi
+
+          # ---------- DXGI / mfplat 补丁 ----------
+          if [ "$APPLY_DXGI_PATCH" = "true" ] && [ -f "$WS/wine_do_not_create_dxgi_device_manager2.patch" ]; then
+            echo "===== 应用 DXGI mfplat 补丁 ====="
+            patch -p1 --forward < "$WS/wine_do_not_create_dxgi_device_manager2.patch" || \
+              echo "⚠️ dxgi 补丁未应用（可能已包含）"
+          fi
+
+          # ---------- 补丁残留检查 ----------
+          if find . -name '*.rej' | grep -q .; then
+            echo "⚠️ 存在 .rej 文件："
+            find . -name '*.rej'
+            exit 1
+          fi
+
+          # ---------- autogen ----------
+          if [ -x ./autogen.sh ]; then
+            echo "===== autogen.sh ====="
+            NOCONFIGURE=1 ./autogen.sh || ./autogen.sh
+          elif [ ! -x ./configure ]; then
+            echo "===== autoreconf ====="
+            autoreconf -fiv
+          fi
+
+          # ---------- GStreamer sysroot（可选） ----------
+          if [ -d "$GST_SYSROOT/pc-gst" ]; then
+            export PKG_CONFIG_PATH="$GST_SYSROOT/pc-gst:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            export PKG_CONFIG_LIBDIR="$GST_SYSROOT/pc-gst:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            echo "✅ 使用 GST sysroot: $GST_SYSROOT"
+          else
+            export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            export PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            echo "ℹ️ 无 GST sysroot，使用系统 pkg-config"
+          fi
+
+          # ---------- configure ----------
+          mkdir -p "$BUILD_DIR"
+          cd "$BUILD_DIR"
+
+          export CC="ccache gcc"
+          export CXX="ccache g++"
+          export CROSSCC="ccache x86_64-w64-mingw32-gcc"
+          export CROSSCXX="ccache x86_64-w64-mingw32-g++"
+          export CFLAGS="-O2 -pipe -fno-plt -fno-semantic-interposition -ffunction-sections -fdata-sections -fmerge-all-constants -fno-ident"
+          export CXXFLAGS="$CFLAGS"
+          export CROSSCFLAGS="-O2 -pipe -ffunction-sections -fdata-sections -fno-ident"
+          export CROSSCXXFLAGS="$CROSSCFLAGS"
+          export LDFLAGS="-Wl,-O2 -Wl,--as-needed -Wl,--gc-sections -Wl,--build-id=none"
+
+          if [ "$ENABLE_PROTON_MF" = "true" ]; then
+            MF_FLAGS="--with-vkd3d"
+          else
+            MF_FLAGS=""
+          fi
+
+          echo "===== configure ====="
+          "$SRC/source/configure" \
+            --enable-win64 \
+            --enable-archs=i386,x86_64 \
+            --prefix="$PREFIX" \
+            --with-x --with-vulkan --with-alsa --with-pulse \
+            --with-freetype --with-fontconfig --with-gstreamer --with-gettext \
+            --with-opengl --with-sdl --enable-nls \
+            --without-wayland --without-ffmpeg \
+            --disable-winemenubuilder --disable-win16 --disable-tests \
+            --without-ldap --without-capi --without-oss --without-cups --without-dbus \
+            --without-coreaudio --without-gphoto --without-osmesa --without-sane \
+            --without-pcap --without-pcsclite --without-udev --without-unwind \
+            --without-usb --without-v4l2 \
+            $MF_FLAGS
+
+          echo "===== make ($(nproc) jobs) ====="
+          make -j"$(nproc)" 2>&1 | tail -80
+          echo "===== make install ====="
+          make install
+
+          # ---------- 版本信息 ----------
+          cd "$SRC/source"
+          if [ "$BUILD_TYPE" = "proton" ]; then
+            VER=$(git describe --tags --abbrev=0 2>/dev/null || echo "$PROTON_BRANCH")
+            HASH=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+            BUILD_NAME="proton-${VER}-${HASH}-wow64"
+          else
+            if [ -f VERSION ]; then
+              VER=$(sed -n 's/^Wine version //p' VERSION 2>/dev/null | tr ' ' '-' || true)
+            fi
+            [ -n "$VER" ] || VER=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^wine-//' || echo unknown)
+            HASH=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+            BUILD_NAME="wine-${VER}-${HASH}-${BRANCH_DESC}-wow64"
+          fi
+          echo "BUILD_NAME=${BUILD_NAME}"
+
+          # ---------- 瘦身 ----------
+          echo "===== strip / 瘦身 ====="
+          find "$PREFIX" -type f \( -name '*.a' -o -name '*.la' \) -delete || true
+          find "$PREFIX" -type f \( -name '*.debug' -o -name '*.dwo' \) -delete || true
+          rm -rf "$PREFIX/include" "$PREFIX/share/man" "$PREFIX/share/doc" || true
+
+          # ---------- 打包 ----------
+          echo "===== 打包 ====="
+          rm -rf /tmp/pkg
+          mkdir -p "/tmp/pkg/${BUILD_NAME}"
+          cp -a "$PREFIX/." "/tmp/pkg/${BUILD_NAME}/"
+          {
+            echo "build_type     : $BUILD_TYPE"
+            echo "branch         : $BRANCH_DESC"
+            echo "build_name     : $BUILD_NAME"
+            echo "host           : $(uname -m)"
+            echo "cc             : $(x86_64-w64-mingw32-gcc --version | head -1)"
+            echo "staging        : $([ -d /tmp/staging ] && echo yes || echo no)"
+            echo "dxgi patch     : $APPLY_DXGI_PATCH"
+            echo "proton mf      : $ENABLE_PROTON_MF"
+            echo "built at (UTC) : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "/tmp/pkg/${BUILD_NAME}/BUILD_INFO.txt"
+
+          cd /tmp/pkg
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+              -cJf "/tmp/${BUILD_NAME}.tar.xz" "${BUILD_NAME}"
+          sha256sum "/tmp/${BUILD_NAME}.tar.xz" > "/tmp/checksums.txt"
+          echo "$BUILD_NAME" > /tmp/BUILD_NAME.txt
+
+          echo "✅ 构建完成:"
+          ls -la "/tmp/${BUILD_NAME}.tar.xz" /tmp/checksums.txt
+
+          # ---------- 拷到宿主可见目录 ----------
+          mkdir -p /tmp/wt-out
+          cp -f "/tmp/${BUILD_NAME}.tar.xz" /tmp/wt-out/
+          cp -f /tmp/checksums.txt /tmp/wt-out/
+          cp -f /tmp/BUILD_NAME.txt /tmp/wt-out/
+
+          # ---------- ccache 归档 ----------
+          cd /root/.cache
+          rm -f /tmp/ccache.tar.xz
+          tar -I 'xz -T$(nproc)' -cf /tmp/ccache.tar.xz ccache || true
+          echo "✅ 全部完成"
+          EOS
+          # 注入输入（用 python 做替换，避免 shell 引号/竖线地狱）
+          python3 - <<'PYINJ'
+          import os
+          mapping = {
+              "__BUILD_TYPE__": os.environ.get("IN_BUILD_TYPE","wine-wow64"),
+              "__PROTON_BRANCH__": os.environ.get("IN_PROTON_BRANCH","proton_11.0"),
+              "__PROTON_REPO__": os.environ.get("IN_PROTON_REPO","WinNative-Emu/proton-wine"),
+              "__WINE_BRANCH__": os.environ.get("IN_WINE_BRANCH","staging"),
+              "__WINE_VERSION__": os.environ.get("IN_WINE_VERSION","latest"),
+              "__APPLY_DXGI_PATCH__": os.environ.get("IN_APPLY_DXGI_PATCH","true"),
+              "__ENABLE_PROTON_MF__": os.environ.get("IN_ENABLE_PROTON_MF","false"),
+              "__USE_TKG__": os.environ.get("IN_USE_TKG","false"),
+          }
+          p="/tmp/build-wine2.sh"
+          s=open(p).read()
+          for k,v in mapping.items():
+              s=s.replace(k,v)
+          open(p,"w").write(s)
+          print("injected:", mapping)
+          PYINJ
+          sudo cp /tmp/build-wine2.sh /tmp/archlinux/bin/build-wine2.sh
+          sudo chmod +x /tmp/archlinux/bin/build-wine2.sh
+          echo "✅ build-wine2.sh 就位"
+
+      # ---------------- 恢复 ccache ----------------
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: bcc-arch-wow64-ccache-${{ github.event.inputs.build_type || 'wine-wow64' }}
+          restore-keys: |
+            bcc-arch-wow64-ccache-
+
+      # ---------------- 编译 ----------------
+      - name: Compile in BCC Arch chroot
+        run: |
+          set -e
+          cd /tmp
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          set +e
+          sudo chroot archlinux /bin/build-wine2.sh
+          RC=$?
+          set -e
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+          exit $RC
+
+      # ---------------- 保存 ccache ----------------
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/archlinux/tmp/ccache.tar.xz
+          key: bcc-arch-wow64-ccache-${{ github.event.inputs.build_type || 'wine-wow64' }}-${{ github.run_id }}
+
+      # ---------------- 取产物 ----------------
+      - name: Collect artifacts
+        run: |
+          set -e
+          ls -la "$OUT_DIR"
+          NAME=$(cat "$OUT_DIR/BUILD_NAME.txt")
+          echo "BUILD_NAME=$NAME" >> "$GITHUB_ENV"
+          mkdir -p /tmp/artifacts
+          cp "$OUT_DIR"/*.tar.xz "$OUT_DIR"/checksums.txt /tmp/artifacts/
+          ls -la /tmp/artifacts
+
+      # ---------------- 上传 artifact ----------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: /tmp/artifacts/*
+          retention-days: 30
+
+      # ---------------- 发布 Release ----------------
+      - name: Publish Release
+        if: ${{ github.event.inputs.publish_release != 'false' }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.BUILD_NAME }}
+          name: ${{ env.BUILD_NAME }}
+          body: |
+            Wine / Proton x86_64 WoW64 — BCC Arch chroot build
+
+            | 项目 | 值 |
+            |---|---|
+            | build | `${{ env.BUILD_NAME }}` |
+            | 类型 | `${{ github.event.inputs.build_type || 'wine-wow64' }}` |
+            | 分支 | wine=`${{ github.event.inputs.wine_branch || 'staging' }}` / proton=`${{ github.event.inputs.proton_branch || 'proton_11.0' }}` |
+            | 环境 | BCC Arch Linux chroot (同 wine_tkg_wow64) |
+            | 架构 | x86_64 宿主 + i386,x86_64 Windows (WoW64) |
+            | workflow | `${{ github.sha }}` |
+            | run | #${{ github.run_number }} |
+          files: |
+            /tmp/artifacts/*.tar.xz
+            /tmp/artifacts/checksums.txt
+          draft: false
+          prerelease: false
