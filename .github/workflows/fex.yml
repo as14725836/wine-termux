@@ -246,6 +246,11 @@ jobs:
           ls -1 /opt/llvm-mingw/lib/libclang-cpp.so* 2>/dev/null || echo "(无 libclang-cpp.so*)"
           echo "--- clang 自检 ---"
           arm64ec-w64-mingw32-clang --version | head -1 || { echo "FATAL: arm64ec clang 跑不起来"; exit 1; }
+          # 系统 fmt（Arch 自带）会让 FEX 的 find_package(fmt) 命中 Linux x86_64 版，
+          # 交叉编译 arm64ec 时报 "IMPORTED_IMPLIB not set for imported target fmt::fmt"。
+          # 这里打印出来便于确认；构建时用 -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE 强制走自带 fmt。
+          echo "--- 系统 fmt（应被 CMAKE_DISABLE_FIND_PACKAGE_fmt 忽略）---"
+          ls -d /usr/lib/cmake/fmt /usr/share/cmake/fmt 2>/dev/null || echo "(无系统 fmt)"
           export FEX_REPO="__FEX_REPO__"
           export FEX_REF="__FEX_REF__"
           export FEX_COMMIT=""
@@ -336,6 +341,7 @@ jobs:
               -DTUNE_ARCH=generic -DTUNE_CPU=none \
               -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
               -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
               ..
             make -j"${JOBS}" arm64ecfex
             test -f Bin/libarm64ecfex.dll
@@ -356,6 +362,7 @@ jobs:
               -DTUNE_ARCH=generic -DTUNE_CPU=none \
               -DMINGW_TRIPLE=aarch64-w64-mingw32 \
               -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
               ..
             make -j"${JOBS}" wow64fex
             test -f Bin/libwow64fex.dll
