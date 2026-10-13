@@ -419,7 +419,6 @@ jobs:
               [libid3tag0]="libi/libid3tag"
               [libx11-xcb1]="libx/libx11"
               [libflac12]="f/flac"
-              [libFLAC12]="f/flac"
               [libogg0]="libo/libogg"
               [libvorbis0a]="libv/libvorbis"
               [libvorbisenc2]="libv/libvorbis"
@@ -429,14 +428,13 @@ jobs:
               [libspeex1]="s/speex"
               [libtwolame0]="t/twolame"
               [libwavpack1]="w/wavpack"
-              [libmpg123-0]="m/mpg1232"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
               sub="${DEBPKG[$pkg]}"
               # 列 pool 目录，找 <pkg>_<ver>_arm64.deb
               idx="${MIRROR}/pool/main/${sub}/"
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | sort -V | tail -1) || true
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | sort -V | tail -1 || true)
               if [ -z "$deb" ]; then
                 echo "  ⚠️ 未找到 $pkg (arm64)"
                 continue
@@ -459,11 +457,11 @@ jobs:
             for pkg in "${!RUNPKG[@]}"; do
               sub="${RUNPKG[$pkg]}"
               idx="${MIRROR}/pool/main/${sub}/"
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | grep -v 'dbgsym' | sort -V | tail -1)
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | grep -v 'dbgsym' | sort -V | tail -1 || true)
               if [ -z "$deb" ]; then echo "  ⚠️ runtime 未找到 $pkg"; continue; fi
               if curl -fsL -o "$deb" "${idx}${deb}"; then
                 _td=$(mktemp -d)
-                ( cd "$_td" && { ar x "$OLDPWD/$deb" 2>/dev/null || bsdtar xf "$OLDPWD/$deb" 2>/dev/null || true; } )
+                ( cd "$_td" && { ar x "$OLDPWD/$deb" 2>/dev/null || bsdtar xf "$OLDPWD/$deb" 2>/dev/null || true; } ) || true
                 dataf=$(ls "$_td"/data.tar.* 2>/dev/null | head -1)
                 if [ -n "$dataf" ]; then
                   tar xf "$dataf" -C "$ARM64_SYSROOT" --exclude='./usr/share/doc/*' \
