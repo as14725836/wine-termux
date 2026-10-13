@@ -805,8 +805,13 @@ jobs:
           # arm64 sysroot（best-effort；找不到就 --without-x 等）
           ARM64_LIBDIR="/usr/aarch64-linux-gnu/lib"
           if [ -f "$ARM64_LIBDIR/libX11.so" ]; then
-            export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig"
-            export PKG_CONFIG_LIBDIR="${ARM64_LIBDIR}/pkgconfig"
+            export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig:${ARM64_LIBDIR}/pkgconfig/../pkgconfig:/usr/aarch64-linux-gnu/lib/pkgconfig:/usr/aarch64-linux-gnu/lib64/pkgconfig"
+            export PKG_CONFIG_LIBDIR="/usr/aarch64-linux-gnu/lib/pkgconfig:/usr/aarch64-linux-gnu/lib64/pkgconfig"
+            # 交叉时 autoconf 会找 ${ac_tool_prefix}pkg-config，Arch 无此前缀工具 → 显式指定
+            export PKG_CONFIG="pkg-config"
+            export PKG_CONFIG_FOR_BUILD="pkg-config"
+            export PULSE_CFLAGS="-I/usr/aarch64-linux-gnu/include -D_REENTRANT"
+            export PULSE_LIBS="-L/usr/aarch64-linux-gnu/lib -lpulse"
             unset PKG_CONFIG_SYSROOT_DIR
             XFLAGS="--with-x"
             VKFLAGS="--with-vulkan"
