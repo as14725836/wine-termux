@@ -346,6 +346,20 @@ jobs:
               [libwayland-server0]="w/wayland"
               [libwayland-cursor0]="w/wayland"
               [libwayland-egl1]="w/wayland"
+              [libxcb1]="libx/libxcb"
+              [libxau6]="libx/libxau"
+              [libxdmcp6]="libx/libxdmcp"
+              [libbsd0]="libb/libbsd"
+              [libmd0]="libm/libmd"
+              [libzstd1]="libz/libzstd"
+              [libbrotli1]="b/brotli"
+              [libgraphite2-3]="g/graphite2"
+              [libharfbuzz0b]="h/harfbuzz"
+              [libpcre2-8-0]="p/pcre2"
+              [libffi8]="libf/libffi"
+              [libuuid1]="u/util-linux"
+              [libselinux1]="libs/libselinux"
+              [libpcre2-16-0]="p/pcre2"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -410,14 +424,18 @@ jobs:
               if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
                 cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/." "$ARCH_SYSROOT/lib/" 2>/dev/null || true
               fi
+              # gcc 的默认库目录是 <sysroot>/lib64（不是 lib）→ 把 lib 内容同步过去
+              mkdir -p "$ARCH_SYSROOT/lib64"
+              cp -a "$ARCH_SYSROOT/lib/." "$ARCH_SYSROOT/lib64/" 2>/dev/null || true
               # pkgconfig 合并（gcc 的 sysroot 下）
-              mkdir -p "$ARCH_SYSROOT/lib/pkgconfig"
+              mkdir -p "$ARCH_SYSROOT/lib/pkgconfig" "$ARCH_SYSROOT/lib64/pkgconfig"
               if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig" ]; then
                 cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
               fi
               if [ -d "$ARM64_SYSROOT/usr/share/pkgconfig" ]; then
                 cp -a "$ARM64_SYSROOT/usr/share/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
               fi
+              cp -a "$ARCH_SYSROOT/lib/pkgconfig/." "$ARCH_SYSROOT/lib64/pkgconfig/" 2>/dev/null || true
               echo "✅ 已合并到 $ARCH_SYSROOT"
               echo "--- sysroot 自检 ---"
               ls -la "$ARCH_SYSROOT"/lib/libX11.so* "$ARCH_SYSROOT"/lib/libfreetype.so* 2>&1 | head -12 || true
