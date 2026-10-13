@@ -347,6 +347,12 @@ jobs:
               [libpulse-dev]="p/pulseaudio"
               [libasound2-dev]="a/alsa-lib"
               [libdrm-dev]="libd/libdrm"
+              [libegl-dev]="libe/libegl"
+              [libglvnd-dev]="libg/libglvnd"
+              [libgl-dev]="libg/libglvnd"
+              [libgles-dev]="libg/libglvnd"
+              [libglx-dev]="libg/libglvnd"
+              [libopengl-dev]="libo/libglvnd"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -410,6 +416,14 @@ jobs:
               [libdrm-intel1]="libd/libdrm"
               [libdrm-nouveau2]="libd/libdrm"
               [libdrm-radeon1]="libd/libdrm"
+              [libegl1]="libe/libegl"
+              [libgles2]="libg/libglvnd"
+              [libglx0]="libg/libglvnd"
+              [libgl1]="libg/libglvnd"
+              [libglvnd0]="libg/libglvnd"
+              [libopengl0]="libo/libglvnd"
+              [libegl-mesa0]="m/mesa"
+              [libgl1-mesa-dri]="m/mesa"
               [libasound2-data]="a/alsa-lib"
               [libasyncns0]="liba/libasyncns"
               [libsndfile1]="libs/libsndfile"
