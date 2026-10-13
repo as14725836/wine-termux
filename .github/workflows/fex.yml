@@ -170,17 +170,49 @@ jobs:
           #!/bin/bash
           set -eux
           GH_TOKEN="GH_TOKEN_PLACEHOLDER"
+          # ---- 镜像：默认镜像(kernel.org)偶发极慢，会让整个升级事务失败 ----
+          if [ -f /etc/pacman.conf ]; then
+            sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 8/' /etc/pacman.conf 2>/dev/null || true
+            grep -q '^ParallelDownloads' /etc/pacman.conf || echo 'ParallelDownloads = 8' >> /etc/pacman.conf
+            sed -i 's/^#DisableDownloadTimeout/DisableDownloadTimeout/' /etc/pacman.conf 2>/dev/null || true
+          fi
+          mkdir -p /etc/pacman.d
+          printf '%s\n' \
+            'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' \
+            'Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch' \
+            'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
+            > /etc/pacman.d/mirrorlist
+
           # Arch 基础依赖：FEX 编译需要 cmake/ninja/python + 一堆库
-          # 注意：这里必须做 full upgrade (-Syu)。只做 -Sy 会造成「部分升级」：
-          # ccache 被升到新版但其新依赖（hiredis / libhiredis.so.1.4.0）没升，
-          # 于是 `/usr/sbin/ccache: error while loading shared libraries: libhiredis.so.1.4.0`。
-          pacman -Syu --noconfirm || true
-          pacman -S --noconfirm --needed \
-            base-devel cmake ninja python python-pip git curl wget \
-            xz unzip file ccache hiredis || true
-          # 补一次 hiredis / ccache（防 -Sy 遗留的 ABI 错配）
-          pacman -S --noconfirm --needed hiredis ccache || true
-          pacman -S --noconfirm --needed nasm pkgconf || true
+          # 必须 full upgrade (-Syu)：只 -Sy 会「部分升级」——
+          # ccache 升到新版却缺新依赖(libhiredis.so.1.4.0) -> Error 127。
+          pacman_pkg() {
+            for attempt in 1 2 3 4; do
+              echo "--- pacman 尝试 $attempt: $* ---"
+              if pacman -S --noconfirm --needed --disable-download-timeout "$@"; then
+                return 0
+              fi
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          pacman -Syu --noconfirm --disable-download-timeout || true
+          pacman_pkg base-devel cmake ninja python python-pip git curl wget \
+                     xz unzip file ccache hiredis nasm pkgconf || true
+          # 硬校验：FEX 构建离不开 cmake/ninja，装不上就直接失败（别再静默）
+          for t in cmake ninja ccache python3; do
+            if ! command -v "$t" >/dev/null 2>&1; then
+              echo "❌ 缺少 $t，重试安装..."
+              pacman_pkg cmake ninja ccache python || true
+            fi
+            command -v "$t" >/dev/null 2>&1 || echo "⚠️ 仍缺少 $t"
+          done
+          if ! cmake --version > /tmp/cmake.ver 2>&1; then
+            echo "FATAL: cmake 不可用（镜像下载失败？）"
+            cat /tmp/cmake.ver 2>/dev/null || true
+            exit 1
+          fi
+          head -1 /tmp/cmake.ver
 
           # ccache 可用性自检：坏掉就禁用，避免整个 FEX 构建被拖死
           if ! ccache --version >/dev/null 2>&1; then
