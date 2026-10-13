@@ -2846,6 +2846,8 @@ class WinComponentsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_pos = None
+        self._press_obj = None
+        self._press_pos = None
         self._drag_start_global = None
         self._dragging = False
         self._server = None
@@ -3007,6 +3009,7 @@ class WinComponentsDialog(QDialog):
         layout.addLayout(row_cfg)
 
         self.setLayout(layout)
+        self.installEventFilter(self)       # 窗口自身空白处也要能拖 / 缩放
         self._install_drag_filter(self)
         self._filter("")
 
@@ -3389,47 +3392,66 @@ class WinComponentsDialog(QDialog):
         QTimer.singleShot(200, check)
 
     def eventFilter(self, obj, event):
-        # 状态行悬停 -> 自绘浮层（显示 wine/prefix 完整路径）
+        # 悬停提示 —— 只在进/出时处理，别的事件要继续往下走，
+        # 否则拖动那段代码永远收不到鼠标事件。
         if obj is getattr(self, "status_label", None):
-            if event.type() == event.Enter:
+            if event.type() == QEvent.Enter:
                 self._show_hover_tip(self._env_tooltip(), obj)
-            elif event.type() == event.Leave:
+            elif event.type() == QEvent.Leave:
                 self._hide_hover_tip()
-            return super().eventFilter(obj, event)
-
-        # 其他挂了 _hover_text 的控件（按钮等）
-        if event.type() in (event.Enter, event.Leave) and obj is not self:
+        elif event.type() in (QEvent.Enter, QEvent.Leave) and obj is not self:
             txt = obj.property("_hover_text") if hasattr(obj, "property") else None
             if txt:
-                if event.type() == event.Enter:
+                if event.type() == QEvent.Enter:
                     self._show_hover_tip(txt, obj)
                 else:
                     self._hide_hover_tip()
-                return super().eventFilter(obj, event)
 
+        # ── 拖动窗口 / 右下角缩放 ──────────────────────────
+        # 无边框窗口没有标题栏，所以要"抓住哪儿都能拖"。
+        # 麻烦在于 QPushButton 一按下就 grab mouse，之后 MouseMove 全被它吃掉，
+        # 窗口再也收不到 —— 所以按下时得 return True 拦住 grab，
+        # 然后自己在 release 里补一次 click()，否则卡片就点不动了。
         if event.type() == event.MouseButtonPress:
             if event.button() == Qt.LeftButton:
-                if isinstance(obj, QScrollBar) or obj.parent() and isinstance(obj.parent(), QScrollBar):
+                # 这些得留给 Qt 自己用
+                if isinstance(obj, QScrollBar) or (obj.parent() and isinstance(obj.parent(), QScrollBar)):
                     return super().eventFilter(obj, event)
                 if isinstance(obj, QScrollArea):
                     return super().eventFilter(obj, event)
+                if obj is self.search_edit:
+                    return super().eventFilter(obj, event)
+
                 gp = event.globalPos()
                 fg = self.frameGeometry()
-                margin = 8
+                margin = 10
                 self._resize_edge = None
-                if gp.x() >= fg.right() - margin and gp.y() >= fg.bottom() - margin:
+                # 只有落在窗口范围内才谈得上"抓右下角" —— 否则滚动区里
+                # 位置偏低的卡片会被误判成缩放边
+                in_win = (fg.left() - margin <= gp.x() <= fg.right() + margin and
+                          fg.top() - margin <= gp.y() <= fg.bottom() + margin)
+                near_r = in_win and gp.x() >= fg.right() - margin
+                near_b = in_win and gp.y() >= fg.bottom() - margin
+                if near_r and near_b:
                     self._resize_edge = "se"
-                elif gp.x() >= fg.right() - margin:
+                elif near_r:
                     self._resize_edge = "e"
-                elif gp.y() >= fg.bottom() - margin:
+                elif near_b:
                     self._resize_edge = "s"
                 if self._resize_edge:
                     self._resize_start_pos = gp
                     self._resize_start_geo = fg
                     return True
+
                 self._drag_pos = gp - fg.topLeft()
                 self._drag_start_global = gp
                 self._dragging = False
+                # 记住按在哪个按钮上 —— 没拖动的话松开时补一次点击
+                self._press_obj = obj if isinstance(obj, QPushButton) else None
+                self._press_pos = gp
+                if self._press_obj is not None:
+                    self._press_obj.setDown(True)
+                    return True          # 拦住 grab，MouseMove 才会发给我们
         elif event.type() == event.MouseMove:
             gp = event.globalPos()
             fg = self.frameGeometry()
@@ -3462,10 +3484,24 @@ class WinComponentsDialog(QDialog):
             else:
                 self.setCursor(Qt.ArrowCursor)
         elif event.type() == event.MouseButtonRelease:
+            was_drag = self._dragging
+            po = getattr(self, "_press_obj", None)
+            self._press_obj = None
             self._drag_pos = None
             self._dragging = False
             self._resize_edge = None
             self.setCursor(Qt.ArrowCursor)
+            if po is not None:
+                # 我们拦了 press，所以按钮的按下态和点击得自己收尾
+                try:
+                    po.setDown(False)
+                except Exception:
+                    pass
+                if not was_drag and po.isEnabled():
+                    inside = po.rect().contains(po.mapFromGlobal(event.globalPos()))
+                    if inside:
+                        po.click()
+                return True
         return super().eventFilter(obj, event)
 
     def paintEvent(self, event):
