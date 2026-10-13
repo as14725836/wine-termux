@@ -231,15 +231,39 @@ jobs:
           # 1. 安装 aarch64-linux 交叉工具链 + 构建依赖（pacman）
           # ============================================================
           echo "===== [1/9] 安装依赖（pacman）====="
-          pacman -Sy --noconfirm --needed \
-            base-devel git curl wget xz zstd unzip file python perl pkgconf ccache \
-            autoconf automake libtool flex bison gettext nasm yasm cmake ninja meson \
-            aarch64-linux-gnu-gcc aarch64-linux-gnu-binutils aarch64-linux-gnu-glibc \
-            mingw-w64-gcc mingw-w64-crt mingw-w64-headers mingw-w64-binutils \
-            || { echo "⚠️ 首次 pacman 失败，重试一次"; pacman -Sy --noconfirm; pacman -S --noconfirm --needed \
-                  base-devel git curl xz zstd unzip file python perl pkgconf ccache \
-                  autoconf automake libtool flex bison gettext nasm cmake ninja meson \
-                  aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc mingw-w64-gcc mingw-w64-crt mingw-w64-headers; }
+          # 镜像选择：官方 mirrors.kernel.org 偶发超时，写入多个备选并开启并行下载
+          if [ -f /etc/pacman.conf ]; then
+            sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 8/' /etc/pacman.conf 2>/dev/null || true
+            grep -q '^ParallelDownloads' /etc/pacman.conf || echo 'ParallelDownloads = 8' >> /etc/pacman.conf
+            sed -i 's/^#DisableDownloadTimeout/DisableDownloadTimeout/' /etc/pacman.conf 2>/dev/null || true
+          fi
+          mkdir -p /etc/pacman.d
+          cat > /etc/pacman.d/mirrorlist <<'MIRREOF'
+          Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+          Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+          Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch
+          MIRREOF
+
+          pacman_install() {
+            for attempt in 1 2 3 4; do
+              echo "--- pacman 尝试 $attempt ---"
+              if pacman -Syy --noconfirm --disable-download-timeout \
+                   base-devel git curl xz zstd unzip file python perl pkgconf ccache \
+                   autoconf automake libtool flex bison gettext nasm cmake ninja meson \
+                   aarch64-linux-gnu-gcc aarch64-linux-gnu-binutils aarch64-linux-gnu-glibc \
+                   mingw-w64-gcc mingw-w64-crt mingw-w64-headers mingw-w64-binutils; then
+                return 0
+              fi
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          if ! pacman_install; then
+            echo "⚠️ 完整依赖安装失败，退化为最小集合再试"
+            pacman -Syy --noconfirm --disable-download-timeout base-devel git curl xz zstd unzip \
+              aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc mingw-w64-gcc mingw-w64-crt mingw-w64-headers \
+              || echo "⚠️ 最小集合也失败，继续（可能在后续步骤暴露）"
+          fi
 
           echo "--- 工具链验证 ---"
           aarch64-linux-gnu-gcc --version | head -1 || true
