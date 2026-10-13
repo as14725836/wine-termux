@@ -460,8 +460,11 @@ jobs:
           test -n "${ASSET}" || { echo "FATAL: ${TAG} 无 .tar.gz"; exit 1; }
           curl -sSL --max-time 600 -o /tmp/box64dev.tar.gz \
             "https://github.com/${BOX64_REPO}/releases/download/${TAG}/${ASSET}"
-          tar xzf /tmp/box64dev.tar.gz -C /tmp
-          SRC=$(find /tmp -name wowbox64.dll | head -1)
+          # 解到独立目录：直接解到 /tmp 会去 utime/chmod 根目录（sticky），tar 报
+          # "Cannot utime: Operation not permitted" 而整体失败。
+          rm -rf /tmp/box64-unpack; mkdir -p /tmp/box64-unpack
+          tar xzf /tmp/box64dev.tar.gz -C /tmp/box64-unpack --no-same-owner --no-same-permissions
+          SRC=$(find /tmp/box64-unpack -name wowbox64.dll | head -1)
           test -n "${SRC}" || { echo "FATAL: 未取到 wowbox64.dll"; exit 1; }
           install -m0644 "${SRC}" "${OUT}/wowbox64.dll"
           echo "${TAG}" > "${OUT}/BOX64_TAG"
