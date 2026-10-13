@@ -1,26 +1,40 @@
 #!/data/data/com.termux/files/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Windows 组件安装 - PyQt5 流式卡片布局
+"""wincomponents —— Windows 组件安装器（PyQt5 单文件）
 
-和 DXVK 版本选择同一个界面、同一套配色、同一套交互；只是把「DXVK 版本包」
-换成「Windows 组件」（VC++ / DirectX / XInput / OpenAL ...），并且沿用同一套
-环境探测：从 wine_path.conf 读 WINEPREFIX，取出当前 wine 目录，装进它的
-.wine/drive_c/windows/。
+界面和交互与 dxvk 版本选择完全一致：同一套深蓝渐变、流式卡片、拖拽缩放、
+单实例窗口、删除确认框。区别只是内容 —— 这里列出的是 Windows 组件
+（DirectX / VC++ / XInput / OpenAL …），点一下卡片就自动下载并装进当前 wine。
 
-组件包放在 usr/wincomponents/*.tar.xz（和 usr/dxvk/*.tar.gz 平行）。
-点卡片 = 把它装进当前 wine；底部一行切换 Windows 版本，一行一键装常用库。
+环境探测也走同一条路：读 wine_path.conf 拿到当前 WINEPREFIX，组件装进
+它的 drive_c/windows/（32 位 -> syswow64，64 位 -> system32）。
+
+组件目录来自 DroidDeck 的公开目录，只列出不需要 Windows 安装器的那部分
+（纯 DLL / 文件拷贝 + DLL overrides）。带 install_exe / install_msi 的组件
+需要真的在 Windows 里跑安装程序，这里不列。
+
+用法：
+    wincomponents            打开界面
+    wincomponents --selftest 只打印认到的环境，不开窗
+    wincomponents --refresh  强制重拉组件目录后开窗
 """
-import sys, os, subprocess, re, math, json, glob, shutil, tarfile
+import sys, os, re, json, time, shutil, tarfile, zipfile, lzma, hashlib
+import base64, tempfile, subprocess, configparser
+import urllib.request, urllib.error
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QApplication,
-    QCheckBox, QScrollArea, QFrame,
+    QDialog, QVBoxLayout, QHBoxLayout, QLayout, QWidget, QLabel, QLineEdit,
+    QPushButton, QApplication, QCheckBox, QScrollArea, QFrame, QSizePolicy,
+    QScrollBar, QButtonGroup,
 )
-from PyQt5.QtCore import Qt, QRectF
-from PyQt5.QtGui import QPainter, QPainterPath, QRegion, QLinearGradient, QColor
+from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer
+from PyQt5.QtGui import (
+    QPainter, QPainterPath, QRegion, QLinearGradient, QColor, QFont,
+)
 
-# ── 直接删除组件包（真删磁盘上的文件）──────────────────────────
-DELETE_CONFIRM = True          # True = 先弹确认框；想"点了就删"就改成 False
+# ── 删除确认（沿用 dxvk 那套）─────────────────────────────
+DELETE_CONFIRM = True
 
 def _human_size(n):
     try:
@@ -32,48 +46,6 @@ def _human_size(n):
     except Exception:
         pass
     return "?"
-
-
-_DEL_STYLE = """
-QDialog { border-radius: 22px; }
-QLabel#delTitle {
-    font-size: 18pt;
-    color: #88ddff;
-    font-weight: bold;
-}
-QLabel#delName {
-    font-size: 14pt;
-    color: #eaf4ff;
-}
-QLabel#delMeta {
-    font-size: 12pt;
-    color: rgba(180, 220, 255, 0.78);
-}
-QLabel#delWarn {
-    font-size: 12pt;
-    color: #ffd27a;
-}
-QPushButton#delCancelBtn {
-    font-size: 15pt;
-    padding: 10px 30px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #aabbcc;
-    border: 1px solid rgba(180, 220, 255, 0.2);
-}
-QPushButton#delCancelBtn:hover { background: rgba(255, 255, 255, 0.12); }
-QPushButton#delCancelBtn:pressed { background: rgba(255, 255, 255, 0.18); }
-QPushButton#delOkBtn {
-    font-size: 15pt;
-    padding: 10px 30px;
-    border-radius: 12px;
-    background: rgba(255, 99, 99, 0.22);
-    color: #ffb3b3;
-    border: 1px solid rgba(255, 120, 120, 0.5);
-}
-QPushButton#delOkBtn:hover { background: rgba(255, 80, 80, 0.38); color: #ffffff; }
-QPushButton#delOkBtn:pressed { background: rgba(255, 80, 80, 0.5); color: #ffffff; }
-"""
 
 
 _DEL_STYLE = """
@@ -501,54 +473,1153 @@ def delete_package(path, parent=None, is_current=False):
         return False, "删除失败：%s" % ex
 
 
-# ════════════════════════════════════════════════════════════
-#  环境探测：当前 wine / 当前 prefix / 组件包目录
-#  和 DXVK 版本选择走完全相同的配置来源
-# ════════════════════════════════════════════════════════════
-PREFIX_DIR = "/data/data/com.termux/files/usr"
-GLIBC_DIR = PREFIX_DIR + "/glibc"
+# -*- coding: utf-8 -*-
+"""wincomponents 内置引擎：catalog 下载 / 安装 / 应用到 prefix。
 
-# DXVK 版本选择读的就是这个文件；这里沿用，保证认到同一个 wine
+合并自 wc-install + wc-apply，供单文件 GUI 使用。
+"""
+
+CATALOG = "https://raw.githubusercontent.com/Droid-Deck/DroidDeck-Components/main/components.json"
+CATALOG_MIRROR = "https://github.com/Droid-Deck/DroidDeck-Components/raw/main/components.json"
+DEFAULT_STORE = Path(os.environ.get("WC_STORE", str(Path.home() / ".local/share/wincomponents")))
+
+FILE_STEPS = {"archive_extract", "download_archive", "copy_dll", "copy_file",
+              "override_dll", "register_dll"}
+LAUNCH_STEPS = {"set_windows", "set_register_key", "uninstall"}
+INSTALLER_STEPS = {"install_exe", "install_msi"}
+
+def dest_path(dest, is_dll=True):
+    """The component-local directory a copy step's 'dest' means."""
+    dest = (dest or "").replace("\\", "/").strip("/")
+    if not dest:
+        return "system32" if is_dll else "windows"
+    parts = dest.split("/")
+    parts[0] = {"win64": "system32", "win32": "syswow64", "system32": "system32",
+                "syswow64": "syswow64", "windows": "windows"}.get(parts[0].lower(), parts[0])
+    out = []
+    for part in parts:
+        if part == "..":
+            if out:
+                out.pop()
+        elif part not in ("", "."):
+            out.append(part)
+    joined = "/".join(out)
+    # Anything that climbed out of windows/ belongs under drive_c instead.
+    if joined.startswith("../") or not joined.startswith(("system32", "syswow64", "windows")):
+        return "drive_c/" + joined.lstrip("./")
+    return joined
+
+
+def fetch_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "wc-install"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def download(url, dest, checksum=None):
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "wc-install"})
+    total = 0
+    with urllib.request.urlopen(req, timeout=600) as r, open(dest, "wb") as out:
+        size = int(r.headers.get("Content-Length") or 0)
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+            total += len(chunk)
+            if size:
+                pct = total * 100 // size
+                sys.stderr.write("\r  %s %d%% (%d/%d)" % (dest.name, pct, total, size))
+        if size:
+            sys.stderr.write("\r" + " " * 60 + "\r")
+    if checksum:
+        got = _md5(dest)
+        if got != checksum.lower():
+            raise SystemExit("checksum mismatch for %s: %s != %s" % (dest.name, got, checksum))
+    return dest
+
+
+def last_extract(work, index, roots):
+    """The tree the most recent archive_extract produced, with its single top folder applied."""
+    keys = sorted(roots, key=lambda k: int(k) if k.isdigit() else -1)
+    if keys:
+        last = keys[-1]
+        return roots.get("top:" + last, roots[last])
+    return None
+
+
+# What a prefix reports for each version this catalog can ask for. The app does this with
+# Wine's own `wine reg` at launch; here it becomes registry.json like any other value.
+WINDOWS_VERSIONS = {
+    "winxp":     ("5.1",   "Service Pack 3", "2600"),
+    "winxp64":   ("5.2",   "Service Pack 2", "3790"),
+    "win2003":   ("5.2",   "Service Pack 2", "3790"),
+    "vista":     ("6.0",   "Service Pack 2", "6002"),
+    "win7":      ("6.1",   "Service Pack 1", "7601"),
+    "win8":      ("6.2",   "",                "9200"),
+    "win81":     ("6.3",   "",                "9600"),
+    "win10":     ("10.0",  "",                "19043"),
+    "win11":     ("10.0",  "",                "22000"),
+}
+
+
+def hive_of(key):
+    head = key.strip("\\").split("\\")[0].upper()
+    return "HKCU" if head.startswith(("HKCU", "HKEY_CURRENT_USER")) else "HKLM"
+
+
+def strip_hive(key):
+    """registry.json holds the key without its hive: ['HKLM', 'Software\\X'] -> 'Software\\X'."""
+    parts = [p for p in key.replace("/", "\\").split("\\") if p]
+    if parts and parts[0].upper().startswith(("HKLM", "HKCU", "HKEY_")):
+        parts = parts[1:]
+    return "\\".join(parts)
+
+
+def reg_type(name):
+    """The catalog writes REG_SZ / REG_DWORD; wc-apply knows sz / dword."""
+    return {"REG_SZ": "sz", "REG_EXPAND_SZ": "expand_sz", "REG_MULTI_SZ": "multi_sz",
+            "REG_DWORD": "dword", "REG_BINARY": "binary", "REG_NONE": "key",
+            "sz": "sz", "dword": "dword"}.get(str(name).upper(), "sz")
+
+
+def same_bytes(a, b):
+    try:
+        if Path(a).stat().st_size != Path(b).stat().st_size:
+            return False
+    except OSError:
+        return False
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            x, y = fa.read(1 << 20), fb.read(1 << 20)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
+def _md5(path):
+    import hashlib
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def unpack(archive, into):
+    into = Path(into)
+    into.mkdir(parents=True, exist_ok=True)
+    name = archive.name.lower()
+    if name.endswith((".tar.xz", ".txz")):
+        with lzma.open(archive, "rb") as f, tarfile.open(fileobj=f) as tar:
+            _safe_extract_tar(tar, into)
+    elif name.endswith((".tar.gz", ".tgz", ".tar")):
+        with tarfile.open(archive) as tar:
+            _safe_extract_tar(tar, into)
+    elif name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            for m in z.namelist():
+                p = Path(m)
+                if p.is_absolute() or ".." in p.parts:
+                    raise SystemExit("unsafe path in zip: %s" % m)
+            z.extractall(into)
+    else:
+        raise SystemExit("unsupported archive: %s" % archive.name)
+    return into
+
+
+def _safe_extract_tar(tar, into):
+    base = Path(into).resolve()
+    for member in tar.getmembers():
+        target = (base / member.name).resolve()
+        if not str(target).startswith(str(base)):
+            raise SystemExit("unsafe path in tar: %s" % member.name)
+    tar.extractall(into)
+
+
+def resolve_tail(cache, work, url):
+    """The extracted thing a catalog-relative url means, matched on its trailing parts."""
+    parts = [p for p in url.strip("/").split("/") if p and p != "temp"]
+    for base in (cache, work):
+        cand = base
+        for part in parts:
+            nxt = cand / part
+            if nxt.exists():
+                cand = nxt
+                continue
+            # The part may be a tar's stem (d3dx9.tar) or absent from this tree.
+            stem = part[:-4] if part.endswith(".tar") else None
+            found = None
+            if cand.is_dir():
+                for e in cand.iterdir():
+                    if stem and e.name == stem:
+                        found = e
+                        break
+                    if e.name.lower() == part.lower():
+                        found = e
+                        break
+            if found is None:
+                cand = None
+                break
+            cand = found
+        if cand is not None and cand.exists():
+            return cand
+    return None
+
+
+def match(pattern, name):
+    """A small shell-glob match, as the catalog's file_name fields use it."""
+    if pattern in ("", "*"):
+        return True
+    rx = "^" + re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+    return re.match(rx, name, re.IGNORECASE) is not None
+
+
+
+# ------------------------------------------------------------------ catalog
+
+def load_catalog():
+    data = fetch_json(CATALOG)
+    if data.get("schemaVersion") != 1:
+        raise SystemExit("unsupported catalog schemaVersion %r" % data.get("schemaVersion"))
+    return data
+
+
+def find(components, name):
+    for c in components:
+        if c.get("name") == name:
+            return c
+    return None
+
+
+def support(c):
+    """'file' when this tool can lay it out, else 'installer' with the reason."""
+    steps = c.get("steps") or []
+    if not steps:
+        return "file", "no steps (nothing to install)"
+    for s in steps:
+        if s.get("action") in INSTALLER_STEPS:
+            return "installer", "%s needs a Windows installer (%s)" % (c["name"], s.get("action"))
+    for s in steps:
+        if s.get("action") not in FILE_STEPS and s.get("action") not in LAUNCH_STEPS:
+            return "installer", "%s has a step this tool does not do (%s)" % (c["name"], s.get("action"))
+    if all(s.get("action") in LAUNCH_STEPS for s in steps):
+        return "file", "registry/windows-version only"
+    return "file", ""
+
+
+# ------------------------------------------------------------------ install
+
+def install(component, store, cache, verbose=True):
+    name = component["name"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+        raise SystemExit("unsafe component name %r" % name)
+    target = Path(store) / name
+    work = Path(cache) / name
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+
+    overrides, registry, requires = [], [], list(component.get("dependencies") or [])
+    files_placed = 0
+    # The catalog's own convention: the extracted archive root is the working dir for the
+    # relative 'url' fields the copy_* steps carry.
+    roots = {}          # step url -> extracted dir
+    default_root = work / "root"
+    default_root.mkdir(exist_ok=True)
+
+    def note(msg):
+        if verbose:
+            print("  " + msg)
+
+    for index, step in enumerate(component.get("steps") or []):
+        action = step.get("action")
+
+        if action in ("archive_extract", "download_archive"):
+            url = step.get("url") or ""
+            src = None
+            if url.startswith("http"):
+                fname = step.get("file_name") or url.split("?")[0].rsplit("/", 1)[-1]
+                dest = Path(cache) / fname
+                if not dest.exists():
+                    note("download %s" % fname)
+                    download(url, dest, step.get("file_checksum"))
+                else:
+                    note("cached   %s" % fname)
+                src = dest
+            else:
+                # A relative url names something an earlier step extracted. The catalog
+                # writes these as its own helper scripts saw them (temp/d3dx9.tar/d3dx9/win32),
+                # so match on the tail of the path rather than on the whole thing.
+                src = resolve_tail(cache, work, url)
+                if src is None:
+                    note("skip archive %s (not found: %s)" % (action, url))
+                    continue
+            out = (work / "extract" / str(index)).resolve()
+            note("unpack   %s" % src.name)
+            unpack(src, out)
+            roots[url] = out
+            roots[str(index)] = out
+            # The extracted tree's own top folder (d3dx9/ in d3dx9.tar.xz) is what the
+            # catalog's later steps are relative to.
+            tops = [e for e in sorted(out.iterdir()) if e.is_dir()]
+            roots["top:" + str(index)] = tops[0] if len(tops) == 1 else out
+            if step.get("dest"):
+                sub = (out / step["dest"]).resolve()
+                if sub.is_dir():
+                    roots["dest:" + step["dest"]] = sub
+            continue
+
+        if action in ("copy_dll", "copy_file"):
+            fname = step.get("file_name") or "*"
+            dest = step.get("dest")
+            arch_dir = dest_path(dest, action == "copy_dll")
+            # The arch for source selection is the leading system32/syswow64, if any.
+            arch_top = arch_dir.split("/")[0]
+            source_root = None
+            url = step.get("url") or ""
+            if url:
+                source_root = roots.get(url) or roots.get("dest:" + url)
+                if source_root is None:
+                    source_root = resolve_tail(cache, work, url)
+                if source_root is None:
+                    source_root = last_extract(work, index, roots)
+            else:
+                source_root = last_extract(work, index, roots)
+            if source_root is None or not Path(source_root).exists():
+                note("skip %s (no source for %s)" % (action, fname))
+                continue
+            # The source archive holds ONE arch: win32/ for i386, win64/ for x86_64. Pick
+            # the one 'dest' asks for, so syswow64 gets the 32-bit DLLs and system32 the
+            # 64-bit ones. A source that has no such wrapper is taken as it is.
+            want = {"system32": "win64", "syswow64": "win32"}.get(arch_top)
+            if want:
+                sub = Path(source_root) / want
+                if sub.is_dir():
+                    source_root = sub
+                else:
+                    # Some archives nest it one level down.
+                    nested = sorted(Path(source_root).glob("*/" + want))
+                    if nested:
+                        source_root = nested[0]
+            placed = 0
+            for found in sorted(Path(source_root).rglob("*")):
+                if not found.is_file():
+                    continue
+                # 'file_name' matches the basename, as the catalog means it.
+                if not match(fname, found.name):
+                    continue
+                outdir = target / arch_dir
+                outdir.mkdir(parents=True, exist_ok=True)
+                target_file = outdir / found.name
+                if target_file.exists() and not same_bytes(found, target_file):
+                    # A real clash: keep both, the second under its source folder name.
+                    target_file = outdir / (found.parent.name + "_" + found.name)
+                shutil.copy2(found, target_file)
+                placed += 1
+            note("%-9s %d file(s) -> %s/" % (action, placed, arch_dir))
+            files_placed += placed
+            continue
+
+        if action == "override_dll":
+            if "bundle" in step:
+                for item in step["bundle"]:
+                    if isinstance(item, dict) and item.get("value"):
+                        overrides.append("%s=%s" % (item["value"], item.get("data", "native,builtin")))
+            elif step.get("dll"):
+                overrides.append("%s=%s" % (step["dll"], step.get("type", "native,builtin")))
+            continue
+
+        if action == "register_dll":
+            for item in (step.get("dlls") or ([step["dll"]] if step.get("dll") else [])):
+                if isinstance(item, str):
+                    overrides.append("%s=n,b" % item)
+            continue
+
+        if action == "set_register_key":
+            key = step.get("key")
+            if key:
+                # The catalog names it "value"; wc-apply (from upstream) reads "name".
+                registry.append({"hive": step.get("hive") or hive_of(key),
+                                 "key": strip_hive(key),
+                                 "type": reg_type(step.get("type", "REG_SZ")),
+                                 "name": step.get("value", step.get("name", "")),
+                                 "data": step.get("data", "")})
+            continue
+
+        if action == "set_windows":
+            ver = str(step.get("version") or "").strip()
+            key = "Software\\Microsoft\\Windows\\CurrentVersion"
+            table = WINDOWS_VERSIONS.get(ver.lower())
+            if table:
+                current, csd, build = table
+                registry.append({"hive": "HKLM", "key": key, "type": "sz",
+                                 "name": "CurrentVersion", "data": current})
+                registry.append({"hive": "HKLM", "key": key, "type": "sz",
+                                 "name": "CurrentBuild", "data": build})
+                registry.append({"hive": "HKLM", "key": key, "type": "sz",
+                                 "name": "CurrentBuildNumber", "data": build})
+                registry.append({"hive": "HKLM", "key": key, "type": "sz",
+                                 "name": "CSDVersion", "data": csd})
+                note("set_windows %s -> CurrentVersion %s" % (ver, current))
+            else:
+                note("set_windows %s (unknown version, nothing written)" % ver)
+            continue
+
+        if action in LAUNCH_STEPS:
+            note("noted    %s (done at launch by wc-apply)" % action)
+            continue
+
+    # component.json is what wc-apply reads.
+    meta = {"overrides": sorted(set(overrides))}
+    if requires:
+        meta["requires"] = requires
+    (target).mkdir(parents=True, exist_ok=True)
+    if registry:
+        # wc-apply (upstream) reads these from registry.json, not component.json.
+        clean = []
+        seen = set()
+        for value in registry:
+            sig = (value["hive"], value["key"].lower(), (value.get("name") or "").lower())
+            if sig in seen:
+                clean = [v for v in clean
+                         if (v["hive"], v["key"].lower(), (v.get("name") or "").lower()) != sig]
+            seen.add(sig)
+            clean.append(value)
+        with open(target / "registry.json", "w", encoding="utf-8") as f:
+            json.dump({"values": clean}, f, indent=1, ensure_ascii=False)
+            f.write("\n")
+    with open(target / "component.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    # What the runs looked like, kept beside it for troubleshooting.
+    with open(target / "wc-install.json", "w", encoding="utf-8") as f:
+        json.dump({"name": name, "description": component.get("description", ""),
+                   "provider": component.get("provider", ""),
+                   "files": files_placed, "overrides": meta["overrides"]}, f, indent=1)
+        f.write("\n")
+    shutil.rmtree(work, ignore_errors=True)
+    return files_placed, sorted(set(overrides))
+
+
+
+
+# ======================================================================
+#  apply: store -> prefix
+# ======================================================================
+
+# --- standalone defaults (this copy is not DroidDeck) -------------------------------
+# Every path can be overridden: WC_STORE / WC_SELECTION / WC_PENDING, or the [[store]] and
+# [[selection]] keys of ~/.config/wc-apply/config.ini.
+def _env_path(name, default):
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else Path(default).expanduser()
+
+def _ini():
+    import configparser
+    conf = configparser.ConfigParser()
+    conf.read([str(_env_path("WC_CONFIG", "~/.config/wc-apply/config.ini"))])
+    return conf
+
+_CONF = _ini()
+
+def _conf_path(section, key, env, default):
+    if os.environ.get(env):
+        return Path(os.environ[env]).expanduser()
+    if _CONF.has_option(section, key):
+        return Path(_CONF.get(section, key)).expanduser()
+    return Path(default).expanduser()
+
+STORE = _conf_path("store", "path", "WC_STORE", "~/.local/share/wincomponents")
+SELECTION = _conf_path("selection", "path", "WC_SELECTION", "~/.config/wc-apply/selection.json")
+# Components still being downloaded, in DroidDeck's format. Only read when it exists, and the
+# launch waits PENDING_WAIT seconds for what it names - 0 turns the wait off.
+PENDING = _conf_path("selection", "pending", "WC_PENDING", "~/.config/wc-apply/pending.json")
+PENDING_WAIT = float(os.environ.get("WC_PENDING_WAIT", _CONF.get("selection", "pending_wait", fallback="0") or 0))
+# What this prefix holds from us, so a component turned off is taken out again.
+STATE = ".wc-apply.json"
+# A file ours replaced that was not Wine's own, put back when the component is turned off.
+# Wine's builtins need no copy: it restores those itself.
+BACKUP = ".wc-apply-backup"
+BUILTIN_MARKS = (b"Wine builtin DLL", b"Wine placeholder DLL")
+ARCH_DIRS = ("system32", "syswow64")
+ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+HIVES = {"HKLM": "system.reg", "HKCU": "user.reg"}
+VALUE_TYPES = {"key", "sz", "expand_sz", "multi_sz", "dword", "binary", "append", "prepend"}
+
+
+def valid_id(value):
+    return isinstance(value, str) and ID.fullmatch(value) is not None and ".." not in value
+
+
+def wanted(app_id, selection=SELECTION):
+    try:
+        with open(selection, encoding="utf-8") as source:
+            config = json.load(source)
+    except FileNotFoundError:
+        return []
+    if config.get("version") != 1:
+        raise ValueError("unsupported components selection")
+    ids = config.get("games", {}).get(app_id, [])
+    if not isinstance(ids, list) or not all(valid_id(i) for i in ids):
+        raise ValueError("invalid components selection")
+    return ids
+
+
+def component(store, cid):
+    """The component's overrides, its files as (relative path, source) and the ids it bundles, or None if not installed."""
+    root = Path(store) / cid
+    try:
+        with open(root / "component.json", encoding="utf-8") as source:
+            meta = json.load(source)
+    except (FileNotFoundError, ValueError):
+        return None
+    files = []
+    for arch in ARCH_DIRS:
+        folder = root / arch
+        if folder.is_dir():
+            # A few go one level down (gmdls: system32/drivers/gm.dls).
+            for entry in sorted(folder.rglob("*")):
+                if entry.is_file() and not entry.is_symlink():
+                    rel = entry.relative_to(folder).as_posix().lower()
+                    files.append(("drive_c/windows/%s/%s" % (arch, rel), entry))
+    drive = root / "drive_c"
+    if drive.is_dir():
+        for entry in sorted(drive.rglob("*")):
+            if entry.is_file() and not entry.is_symlink():
+                files.append(("drive_c/" + entry.relative_to(drive).as_posix(), entry))
+    requires = [r for r in meta.get("requires", []) if valid_id(r)]
+    return [str(o) for o in meta.get("overrides", [])], files, requires, registry_values(root)
+
+
+def registry_values(root):
+    """The component's registry values (registry.json), the ones that are well formed."""
+    try:
+        with open(Path(root) / "registry.json", encoding="utf-8") as source:
+            values = json.load(source).get("values", [])
+    except (FileNotFoundError, ValueError, AttributeError):
+        return []
+    good = []
+    for value in values if isinstance(values, list) else []:
+        if isinstance(value, dict) and value.get("hive") in HIVES and isinstance(value.get("key"), str) \
+                and value.get("type") in VALUE_TYPES and value["key"].strip("\\") and "\0" not in value["key"]:
+            good.append(value)
+    return good
+
+
+def expand(store, ids):
+    """The picks with everything they bundle, each once, a bundle's parts before it."""
+    out, seen = [], set()
+
+    def visit(cid, depth):
+        if cid in seen or depth > 8:
+            return
+        seen.add(cid)
+        found = component(store, cid)
+        for dep in (found[2] if found else []):
+            visit(dep, depth + 1)
+        out.append(cid)
+
+    for cid in ids:
+        visit(cid, 0)
+    return out
+
+
+def spelled(path):
+    """path with each folder that exists spelled as the prefix spells it (Windows names ignore case)."""
+    parts = path.parts
+    current = Path(parts[0])
+    for part in parts[1:]:
+        candidate = current / part
+        if not candidate.exists():
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        if entry.name.lower() == part.lower() and entry.is_dir():
+                            candidate = current / entry.name
+                            break
+            except OSError:
+                pass
+        current = candidate
+    return current
+
+
+def existing(path):
+    """The file at path as the prefix spells it: Windows names ignore case, the filesystem may not."""
+    folder = spelled(path.parent)
+    path = folder / path.name
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.name.lower() == path.name.lower():
+                    return folder / entry.name
+    except OSError:
+        pass
+    return None
+
+
+def same(src, dst):
+    try:
+        if dst.is_symlink():
+            return False
+        a, b = src.stat(), dst.stat()
+    except OSError:
+        return False
+    return a.st_size == b.st_size and int(a.st_mtime) == int(b.st_mtime)
+
+
+def builtin(path):
+    """Proton's own: a symlink into its files, or a Wine DLL that says so in its DOS stub."""
+    if path.is_symlink():
+        return True
+    try:
+        with open(path, "rb") as source:
+            head = source.read(512)
+    except OSError:
+        return False
+    return any(mark in head for mark in BUILTIN_MARKS)
+
+
+def place(src, target, backup=None):
+    """Copies src over target unless it is already there; a file of someone else's goes to backup first."""
+    target = spelled(target.parent) / target.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    found = existing(target)
+    if found is not None and same(src, found):
+        return False
+    if found is not None and backup is not None and not backup.exists() and not builtin(found):
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(found, backup)
+    final = found or target
+    temp = final.with_name(".%s.droiddeck" % final.name)
+    shutil.copy2(src, temp)
+    # Over a Proton builtin this swaps its symlink for our file.
+    os.replace(temp, final)
+    return True
+
+
+# ---------------------------------------------------------------- the prefix's registry files
+
+def reg_escape(text, extra=""):
+    """A string as Wine's registry files write it."""
+    out = []
+    for ch in text:
+        if ch == "\\" or ch == '"' or ch in extra:
+            out.append("\\" + ch)
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\0":
+            out.append("\\0")
+        elif ch < " " or ch > "~":
+            out.append("\\x%04x" % ord(ch))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def reg_unescape(text):
+    out, i = [], 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "\\" or i + 1 >= len(text):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt == "x":
+            match = re.match(r"[0-9a-fA-F]{1,4}", text[i + 2:])
+            if match:
+                out.append(chr(int(match.group(0), 16)))
+                i += 2 + len(match.group(0))
+                continue
+        out.append({"n": "\n", "r": "\r", "t": "\t", "0": "\0"}.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
+def reg_key_line(key):
+    return "[%s]" % "\\\\".join(reg_escape(part, "[]") for part in key.strip("\\").split("\\"))
+
+
+def reg_value_line(name, kind, data):
+    """name=data as one registry file line; None for a kind that has no line of its own."""
+    head = "@" if name == "" else '"%s"' % reg_escape(name)
+    if kind == "sz":
+        return '%s="%s"' % (head, reg_escape(str(data)))
+    if kind == "expand_sz":
+        return '%s=str(2):"%s"' % (head, reg_escape(str(data)))
+    if kind == "multi_sz":
+        parts = [str(part) for part in data] if isinstance(data, list) else [str(data)]
+        return '%s=str(7):"%s"' % (head, reg_escape("".join(part + "\0" for part in parts)))
+    if kind == "dword":
+        return "%s=dword:%08x" % (head, int(data) & 0xFFFFFFFF)
+    if kind == "binary":
+        digits = re.sub(r"[^0-9a-f]", "", str(data).lower())
+        return "%s=hex:%s" % (head, ",".join(digits[i:i + 2] for i in range(0, len(digits) - 1, 2)))
+    return None
+
+
+def reg_string(line):
+    """The text of a string value line (plain or str(2)), or None for any other kind."""
+    match = re.match(r'^(?:@|"(?:[^"\\]|\\.)*")=(?:str\(2\):)?"((?:[^"\\]|\\.)*)"\s*$', line)
+    return reg_unescape(match.group(1)) if match else None
+
+
+class RegistryFile:
+    """One of a prefix's registry files, as Wine keeps them: [key] sections of name=value lines."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        with open(self.path, encoding="utf-8", errors="surrogateescape", newline="") as source:
+            self.lines = source.read().split("\n")
+        self.changed = False
+        self.index = {}
+        self.links = {}
+        root = ""
+        for line in self.lines[:4]:
+            match = re.match(r"^;; All keys relative to (.*)$", line)
+            if match:
+                root = reg_unescape(match.group(1)).strip("\\").lower()
+        current = None
+        for number, line in enumerate(self.lines):
+            if line.startswith("["):
+                key = self.parse_key(line)
+                current = key
+                if key is not None:
+                    self.index.setdefault(key.lower(), number)
+            elif line == "#link" and current is not None:
+                target = self.link_target(number, root)
+                if target:
+                    self.links[current.lower()] = target
+
+    def link_target(self, number, root):
+        """Where the link key whose "#link" line is at number leads, relative to this file's root."""
+        for at in range(number + 1, min(number + 8, len(self.lines))):
+            line = self.lines[at]
+            if line.startswith("["):
+                return None
+            if line.startswith('"SymbolicLinkValue"=hex(6):'):
+                data = line.split(":", 1)[1]
+                while data.endswith("\\") and at + 1 < len(self.lines):
+                    at += 1
+                    data = data[:-1] + self.lines[at].strip()
+                try:
+                    raw = bytes(int(part, 16) for part in data.split(",") if part.strip())
+                    target = raw.decode("utf-16-le").strip("\\")
+                except ValueError:
+                    return None
+                if root and target.lower().startswith(root + "\\"):
+                    return target[len(root) + 1:]
+                return None
+        return None
+
+    def resolve(self, key):
+        """The key Wine really keeps key in: a path through a link key leads to the link's target."""
+        key = key.strip("\\")
+        for _ in range(8):
+            lower = key.lower()
+            for link, target in self.links.items():
+                if lower == link or lower.startswith(link + "\\"):
+                    key = target + key[len(link):]
+                    break
+            else:
+                return key
+        return key
+
+    @staticmethod
+    def parse_key(line):
+        end, i = None, 1
+        while i < len(line):
+            if line[i] == "\\":
+                i += 2
+                continue
+            if line[i] == "]":
+                end = i
+                break
+            i += 1
+        return None if end is None else reg_unescape(line[1:end])
+
+    def section(self, key):
+        """(start, end) line numbers of the key's values, or None."""
+        start = self.index.get(self.resolve(key).lower())
+        if start is None:
+            return None
+        end = start + 1
+        while end < len(self.lines) and not self.lines[end].startswith("["):
+            end += 1
+        return start + 1, end
+
+    @staticmethod
+    def value_name(line):
+        if line.startswith("@="):
+            return ""
+        match = re.match(r'^"((?:[^"\\]|\\.)*)"=', line)
+        return reg_unescape(match.group(1)).lower() if match else None
+
+    def find(self, key, name):
+        """(first, last + 1) of the value's lines, or None."""
+        span = self.section(key)
+        if span is None:
+            return None
+        wanted = name.lower()
+        number = span[0]
+        while number < span[1]:
+            line = self.lines[number]
+            last = number
+            while self.lines[last].endswith("\\") and last + 1 < span[1]:
+                last += 1
+            if self.value_name(line) == wanted:
+                return number, last + 1
+            number = last + 1
+        return None
+
+    def get(self, key, name):
+        found = self.find(key, name)
+        return None if found is None else "\n".join(self.lines[found[0]:found[1]])
+
+    def ensure_key(self, key):
+        key = self.resolve(key)
+        if key.lower() in self.index:
+            return
+        now = time.time()
+        while self.lines and self.lines[-1] == "":
+            self.lines.pop()
+        self.lines += ["", "%s %d" % (reg_key_line(key), int(now)),
+                       "#time=%x" % (int(now * 10000000) + 116444736000000000)]
+        self.index[key.lower()] = len(self.lines) - 2
+        self.lines.append("")
+        self.changed = True
+
+    def put(self, key, name, raw):
+        """Sets the value's line(s) to raw, or removes the value when raw is None; True if that changed it."""
+        found = self.find(key, name)
+        if raw is None:
+            if found is None:
+                return False
+            del self.lines[found[0]:found[1]]
+            self.shift(found[0], found[0] - found[1])
+            self.changed = True
+            return True
+        new = raw.split("\n")
+        if found is not None:
+            if self.lines[found[0]:found[1]] == new:
+                return False
+            self.lines[found[0]:found[1]] = new
+            self.shift(found[0], len(new) - (found[1] - found[0]))
+        else:
+            self.ensure_key(key)
+            start, end = self.section(key)
+            while end > start and self.lines[end - 1] == "":
+                end -= 1
+            self.lines[end:end] = new
+            self.shift(end, len(new))
+        self.changed = True
+        return True
+
+    def shift(self, at, by):
+        if by:
+            for key, number in self.index.items():
+                if number >= at:
+                    self.index[key] = number + by
+
+    def save(self):
+        if not self.changed:
+            return
+        temp = self.path.with_name("." + self.path.name + ".droiddeck")
+        with open(temp, "w", encoding="utf-8", errors="surrogateescape", newline="") as out:
+            out.write("\n".join(self.lines))
+        shutil.copymode(self.path, temp)
+        os.replace(temp, self.path)
+        self.changed = False
+
+
+def list_line(name, current, item, separator, add, at_end=True):
+    """current (a string value line) with item added to or taken out of its list, None if it had
+    nothing else; a value that is not a string is left as it is."""
+    text = reg_string(current) if current is not None else ""
+    if text is None:
+        return current
+    items = [part for part in text.split(separator) if part and part.lower() != item.lower()]
+    if add:
+        items = items + [item] if at_end else [item] + items
+    if not items:
+        return None
+    expand = current is None or "=str(2):" in current
+    return reg_value_line(name, "expand_sz" if expand else "sz", separator.join(items))
+
+
+def apply_registry(pfx, values, state):
+    """Writes the picked components' registry values into the prefix and takes out the ones of
+    components turned off: a value goes back to what it was before, an entry added to a list such
+    as PATH just leaves the list. Returns (values written, notes)."""
+    files = {}
+    for hive, name in HIVES.items():
+        if (pfx / name).is_file():
+            files[hive] = RegistryFile(pfx / name)
+    old = state.get("registry") if isinstance(state.get("registry"), dict) else {}
+    keep, notes, written, waiting = {}, [], 0, 0
+    for cid, value in values:
+        reg = files.get(value["hive"])
+        if reg is None:
+            waiting += 1
+            continue
+        if value["type"] == "key":
+            reg.ensure_key(value["key"])
+            continue
+        name = value.get("name") or ""
+        ident = "%s\t%s\t%s" % (value["hive"], value["key"].lower(), name.lower())
+        current = reg.get(value["key"], name)
+        record = keep.get(ident) or (old.get(ident) if isinstance(old.get(ident), dict) else None) or {"prev": current}
+        if value["type"] in ("append", "prepend"):
+            line = list_line(name, current, str(value.get("data", "")), value.get("separator") or ";", True,
+                             value["type"] == "append")
+            record = dict(record, item=str(value.get("data", "")), separator=value.get("separator") or ";")
+        else:
+            line = reg_value_line(name, value["type"], value.get("data"))
+        if line != current and reg.put(value["key"], name, line):
+            written += 1
+        keep[ident] = dict(record, cid=cid, hive=value["hive"], key=value["key"], name=name)
+    for ident, record in old.items():
+        if ident in keep or not isinstance(record, dict) or not isinstance(record.get("key"), str):
+            continue
+        reg = files.get(record.get("hive"))
+        if reg is None:
+            keep[ident] = record
+            continue
+        name = record.get("name") or ""
+        if "item" in record:
+            line = list_line(name, reg.get(record["key"], name), record["item"], record.get("separator") or ";", False)
+        else:
+            line = record.get("prev")
+        if reg.put(record["key"], name, line):
+            written += 1
+    for reg in files.values():
+        reg.save()
+    state["registry"] = keep
+    if waiting:
+        notes.append("%d registry value(s) wait for the prefix: they go in on the next launch" % waiting)
+    return written, notes
+
+def load_state(compat):
+    try:
+        with open(compat / STATE, encoding="utf-8") as source:
+            state = json.load(source)
+        return state if isinstance(state.get("files"), dict) else {"files": {}}
+    except (FileNotFoundError, ValueError, AttributeError):
+        return {"files": {}}
+
+
+def save_state(compat, state):
+    temp = compat / (STATE + ".tmp")
+    with open(temp, "w", encoding="utf-8") as out:
+        json.dump(state, out, indent=1, sort_keys=True)
+    os.replace(temp, compat / STATE)
+
+
+def pending_for(app_id, pending=PENDING):
+    """The component ids the app is still getting ready for app_id; empty when none (or no file)."""
+    try:
+        with open(pending, encoding="utf-8") as source:
+            ids = json.load(source).get("games", {}).get(str(app_id), [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [i for i in ids if valid_id(i)] if isinstance(ids, list) else []
+
+
+def wait_for_pending(app_id, pending=PENDING, store=STORE, timeout=PENDING_WAIT, sleep=time.sleep, clock=time.monotonic):
+    """Waits (at most timeout seconds) for the components still being got ready for app_id to be in
+    the store or dropped from the pending list. No wait at all when nothing is pending. Returns a
+    note for the log, or None."""
+    def missing():
+        return [cid for cid in pending_for(app_id, pending) if component(store, cid) is None]
+    left = missing()
+    if not left:
+        return None
+    asked = list(left)
+    start = clock()
+    while left and clock() - start < timeout:
+        sleep(0.5)
+        left = missing()
+    waited = int((clock() - start) * 1000)
+    if left:
+        return "wincomp: %s launched without %s (not ready)" % (app_id, ",".join(left))
+    return "wincomp: %s waited %dms for %s" % (app_id, waited, ",".join(asked))
+
+
+def apply(compat_path, app_id, selection=SELECTION, store=STORE, pending=PENDING, wait=wait_for_pending):
+    """Brings the prefix in line with the game's picks. Returns (overrides, notes)."""
+    compat = Path(compat_path)
+    pfx = compat / "pfx"
+    # A game Steam installed during this session may have components still on their way.
+    waited = wait(app_id, pending, store) if wait else None
+    ids = wanted(app_id, selection)
+    state = load_state(compat)
+    if not ids and not state["files"] and not state.get("registry"):
+        return [], []
+    notes, overrides, keep = ([waited] if waited else []), [], {}
+    copied = 0
+    installed = []
+    values = []
+    for cid in expand(store, ids):
+        found = component(store, cid)
+        if found is None:
+            notes.append("%s is not installed; skipped" % cid)
+            continue
+        installed.append(cid)
+        names, files, _, registry = found
+        overrides += names
+        values += [(cid, value) for value in registry]
+        for rel, src in files:
+            # A file this prefix already has from us is ours to replace; anything else is kept.
+            if place(src, pfx / rel, None if rel in state["files"] else compat / BACKUP / rel):
+                copied += 1
+            keep[rel] = cid
+    removed = restored = 0
+    for rel, cid in state["files"].items():
+        if rel in keep:
+            continue
+        path = existing(pfx / rel)
+        saved = compat / BACKUP / rel
+        if saved.is_file():
+            target = path or (pfx / rel)
+            os.replace(saved, target)
+            restored += 1
+        elif path is not None and not path.is_symlink():
+            path.unlink()
+            removed += 1
+    if removed:
+        # Proton refreshes its builtins only when its config changes; forgetting the config puts
+        # its own DLLs back where ours were on the next launch - this one.
+        try:
+            (compat / "config_info").unlink()
+        except FileNotFoundError:
+            pass
+    compat.mkdir(parents=True, exist_ok=True)
+    new_state = {"files": keep, "components": installed, "registry": state.get("registry", {})}
+    written = 0
+    if values or new_state["registry"]:
+        written, registry_notes = apply_registry(pfx, values, new_state)
+        notes += registry_notes
+    save_state(compat, new_state)
+    if copied or removed or restored or written:
+        note = "components %s: %d file(s) placed, %d removed" % (",".join(ids) or "none", copied, removed)
+        note += ", %d put back as they were" % restored if restored else ""
+        notes.append(note + (", %d registry value(s) written" % written if written else ""))
+    return overrides, notes
+
+
+def overrides_value(names):
+    """WINEDLLOVERRIDES entries: native-then-builtin unless the component says otherwise; the last word on a DLL wins."""
+    modes = {}
+    for entry in names:
+        name, _, mode = entry.partition("=")
+        name = name.strip().lower()
+        if not name or not re.fullmatch(r"[a-z0-9._-]+", name):
+            continue
+        # The catalog writes the modes both ways: Wine's letters (n,b) and the long names
+        # (native,builtin). WINEDLLOVERRIDES takes either, but only the letters survive a
+        # round trip through some launchers, so the long form is shortened here.
+        mode = (mode if "=" in entry else "n,b").strip().lower()
+        letters = ""
+        for word in (w.strip() for w in mode.split(",")):
+            letters += {"native": "n", "builtin": "b", "disabled": "", "": ""}.get(word, word)
+        if not re.fullmatch(r"[nb]*", letters):
+            continue
+        modes.pop(name, None)
+        modes[name] = letters or "n,b"
+    return ";".join("%s=%s" % item for item in modes.items())
+
+
+# ------------------------------------------------------------------ catalog cache
+CATALOG_TTL = 6 * 3600
+
+def _cache_dir():
+    d = Path(os.environ.get("WC_CACHE", str(Path.home() / ".cache/wincomponents")))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def catalog_cache_file():
+    return _cache_dir() / "components.json"
+
+def fetch_catalog(force=False, timeout=25):
+    """catalog 带磁盘缓存（6 小时）。返回 (components, source)。"""
+    cf = catalog_cache_file()
+    if not force and cf.is_file():
+        age = time.time() - cf.stat().st_mtime
+        if age < CATALOG_TTL:
+            try:
+                data = json.loads(cf.read_text(encoding="utf-8"))
+                comps = data["components"] if isinstance(data, dict) else data
+                return comps, "cache"
+            except Exception:
+                pass
+    last = None
+    for url in (CATALOG, CATALOG_MIRROR):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "wincomponents/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            data = json.loads(raw.decode("utf-8"))
+            comps = data["components"] if isinstance(data, dict) else data
+            cf.write_bytes(raw)
+            return comps, "net"
+        except Exception as e:
+            last = e
+    raise RuntimeError("拿不到组件目录：%s" % last)
+
+
+def component_size(c):
+    """组件大概要下多少字节。"""
+    total = 0
+    for s in c.get("steps") or []:
+        u = s.get("url") or ""
+        if not u.startswith("http"):
+            continue
+        try:
+            total = max(total, int(s.get("file_size") or 0))
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
+def component_kind(c):
+    """-> ('file'|'installer', reason)"""
+    return support(c)
+
+
+# ════════════════════════════════════════════════════════════
+#  环境探测 + 安装编排（GUI 用）
+# ════════════════════════════════════════════════════════════
+TERMUX_PREFIX = "/data/data/com.termux/files/usr"
+GLIBC_DIR = TERMUX_PREFIX + "/glibc"
 CONF_FILE = GLIBC_DIR + "/opt/conf/wine_path.conf"
-
-# 组件包（.tar.xz）放这里，和 usr/dxvk/*.tar.gz 平行
-PKG_DIR = PREFIX_DIR + "/wincomponents"
-ALLOW_PKG_DIR = PKG_DIR            # 安全闸：只允许删这个目录里的文件
-
-# 装进 wine 的位置（相对 prefix）
 WINDOWS_SUBPATH = "drive_c/windows"
-
-# wc-install / wc-apply 在 PATH 里找不到时的兜底位置
-TOOL_HINTS = [
-    PREFIX_DIR + "/bin",
-    "/data/data/com.termux/files/home/.local/bin",
-    os.path.join(os.path.expanduser("~"), ".local/bin"),
-]
 
 
 def read_wine_config():
-    """读 wine_path.conf，返回 (wine 目录全名, WINEPREFIX, prefix 根目录)。
-
-    和 DXVK 版本选择同一套逻辑：拿 WINEPREFIX 的父目录名当 wine 目录名。
-    extra 兜底：如果 conf 不在，就扫 glibc/ 下面看起来像 wine 的目录，挑最新的
-    —— 环境是我这份模拟器，配置偶尔会被别的脚本改写，多一条路总比报错好。
-    """
-    wine_prefix, wine_dir_name = None, None
+    """读 wine_path.conf -> (wine 目录名, WINEPREFIX, wine 根目录)。"""
+    import glob
+    wine_prefix = wine_dir_name = None
     try:
         if os.path.isfile(CONF_FILE):
             with open(CONF_FILE, "r") as f:
                 for line in f:
                     if line.startswith("export WINEPREFIX="):
-                        p = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                        p = line.split("=", 1)[1].strip().strip('"').strip("'")
                         p = os.path.expandvars(p)
                         wine_prefix = p
                         wine_dir_name = os.path.basename(os.path.dirname(p))
                         break
     except Exception:
         pass
-
     if not wine_dir_name:
-        # 兜底：glibc 下最像 wine 的那个目录（mtime 最新优先）
         best, best_t = None, -1
         try:
             for d in glob.glob(GLIBC_DIR + "/*"):
@@ -565,148 +1636,188 @@ def read_wine_config():
         if best:
             wine_dir_name = os.path.basename(best)
             wine_prefix = best + "/.wine"
-
     if not wine_dir_name:
         return None, None, None
-
     root = os.path.join(GLIBC_DIR, wine_dir_name)
     if not wine_prefix:
         wine_prefix = root + "/.wine"
     return wine_dir_name, wine_prefix, root
 
 
-def get_wine_root():
-    return read_wine_config()[2]
-
-
-def get_wine_target_dir():
-    """组件要装到的 windows/ 目录 —— 和 DXVK 版本选择算出来的是同一个地方。"""
-    wine_dir_name, wine_prefix, _ = read_wine_config()
-    if not wine_dir_name:
-        return None
-    # 优先用 WINEPREFIX 自己，它才是真正在用的那个 prefix
-    if wine_prefix and os.path.isdir(wine_prefix):
-        return os.path.join(wine_prefix, WINDOWS_SUBPATH) + "/"
-    return os.path.join(GLIBC_DIR, wine_dir_name, ".wine", WINDOWS_SUBPATH) + "/"
-
-
 def wine_prefix_dir():
-    """当前 prefix 根目录（.wine 那个），没有就 None。"""
     _, wine_prefix, _ = read_wine_config()
     if wine_prefix and os.path.isdir(wine_prefix):
         return wine_prefix
-    root = get_wine_root()
+    _, _, root = read_wine_config()
     if root:
         p = os.path.join(root, ".wine")
         return p if os.path.isdir(p) else None
     return None
 
 
-def find_tool(name):
-    """找 wc-install / wc-apply；找不到返回 None。"""
-    p = shutil.which(name)
-    if p:
-        return p
-    for d in TOOL_HINTS:
-        cand = os.path.join(d, name)
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return cand
+def get_wine_target_dir():
+    _, wine_prefix, _ = read_wine_config()
+    if not wine_prefix:
+        return None
+    if os.path.isdir(wine_prefix):
+        return os.path.join(wine_prefix, WINDOWS_SUBPATH) + "/"
+    _, _, root = read_wine_config()
+    if root:
+        return os.path.join(root, ".wine", WINDOWS_SUBPATH) + "/"
     return None
 
 
-def _first_line(text, default=""):
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if line:
-            return line
-    return default
-
-
 def env_summary():
-    """给界面顶部显示的一行环境信息。"""
-    wine_dir_name, wine_prefix, _ = read_wine_config()
-    if not wine_dir_name:
+    name, pfx, _ = read_wine_config()
+    if not name:
         return "未找到 wine（看 %s）" % CONF_FILE
-    return "当前 wine: %s　·　prefix: %s" % (wine_dir_name, wine_prefix or "?")
+    return "当前 wine: %s　·　prefix: %s" % (name, pfx or "?")
 
 
-# ── 组件包 ────────────────────────────────────────────
+# ── store / compat 布局 ─────────────────────────────────
 def store_dir():
-    """组件 store：wc-install 下载解包后的落点。
+    return os.environ.get("WC_STORE") or str(DEFAULT_STORE)
 
-    默认 ~/.local/share/wincomponents（wc-install / wc-apply 自己的默认），
-    也可以用 WC_STORE 环境变量指到别处；界面上看到的组件就来自这里。
+
+def cache_dir():
+    d = os.environ.get("WC_INSTALL_CACHE") or os.path.join(
+        os.path.expanduser("~"), ".cache", "wincomponents", "downloads")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _compat_for_prefix(pfx):
+    """wc-apply 写死 compat/pfx，这里给任意 prefix 造一个 compat 外壳。
+
+    prefix 目录名正好是 pfx 时直接用它的父目录；否则在缓存里建
+    <hash>/pfx 软链指回真 prefix，状态和备份都落在缓存里。
     """
-    return os.environ.get("WC_STORE") or os.path.join(
-        os.path.expanduser("~"), ".local", "share", "wincomponents")
-
-
-def list_versions():
-    """列出所有可用组件，返回 [(显示名, 路径)] —— 和 DXVK 那版同形。
-
-    两个来源：
-      · store 里已经装好的组件（wc-install 下的），路径就是 store/<id>
-      · usr/wincomponents/*.tar.xz 本地包（和 usr/dxvk/*.tar.gz 平行）
-    同名只列一次，store 优先（store 才带 overrides / 注册表信息）。
-    """
-    seen = {}
-    st = store_dir()
-    if os.path.isdir(st):
-        for d in sorted(os.listdir(st)):
-            full = os.path.join(st, d)
-            if d.startswith(".") or not os.path.isdir(full):
-                continue
-            seen[d] = full
-    if os.path.isdir(PKG_DIR):
-        for f in sorted(os.listdir(PKG_DIR)):
-            for suf in (".tar.xz", ".tar.gz"):
-                if f.endswith(suf):
-                    name = f[:-len(suf)]
-                    seen.setdefault(name, os.path.join(PKG_DIR, f))
-                    break
-    return sorted(seen.items())
-
-
-def read_installed():
-    """当前 prefix 里已经装过哪些组件（wc-apply 的状态文件）。"""
-    pfx = wine_prefix_dir()
     if not pfx:
-        return []
-    # 状态文件位置按优先级：给裸 .wine prefix 用的批处理目录 -> prefix 自己旁边
-    cands = []
-    try:
-        cands.append(os.path.join(_compat_for_prefix(pfx), ".wc-apply.json"))
-    except Exception:
+        return None
+    pfx = os.path.abspath(pfx)
+    if os.path.basename(pfx) == "pfx":
+        return os.path.dirname(pfx)
+    import hashlib as _h
+    tag = _h.sha1(pfx.encode()).hexdigest()[:12]
+    base = os.path.join(os.path.expanduser("~"), ".cache", "wincomponents", tag)
+    os.makedirs(base, exist_ok=True)
+    link = os.path.join(base, "pfx")
+    if os.path.islink(link):
+        if os.path.realpath(link) != pfx:
+            os.unlink(link)
+            os.symlink(pfx, link)
+    elif not os.path.exists(link):
+        os.symlink(pfx, link)
+    elif os.path.isdir(link) and os.path.realpath(link) == pfx:
         pass
-    cands += [
-        os.path.join(os.path.dirname(pfx), ".wc-apply.json"),
-        os.path.join(pfx, ".wc-apply.json"),
-        os.path.join(pfx, "..", ".wc-apply.json"),
-    ]
-    for cand in cands:
+    elif os.path.isdir(link):
+        # 真目录占位：换成一个软链
+        alt = link + ".orig"
+        if not os.path.exists(alt):
+            os.rename(link, alt)
+        os.symlink(pfx, link)
+    return base
+
+
+def appid_for_prefix(pfx=None):
+    """每个 prefix 一个稳定的 appid，选择/状态才能持久。"""
+    pfx = pfx or wine_prefix_dir()
+    if not pfx:
+        return None
+    import hashlib as _h
+    return "p%s" % (_h.sha1(os.path.abspath(pfx).encode()).hexdigest()[:12])
+
+
+def selection_file(appid=None):
+    base = os.environ.get("WC_SELECTION") or os.path.join(
+        os.path.expanduser("~"), ".config", "wincomponents", "selection.json")
+    return base
+
+
+# ── 选择读写 ──────────────────────────────────────────
+def read_selection(appid):
+    f = selection_file()
+    try:
+        with open(f, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except Exception:
+        return []
+    if cfg.get("version") != 1:
+        return []
+    ids = cfg.get("games", {}).get(appid, [])
+    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+
+
+def write_selection(appid, ids):
+    f = selection_file()
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    cfg = {"version": 1, "games": {}}
+    if os.path.isfile(f):
         try:
-            with open(cand, "r") as f:
-                return json.load(f).get("components", [])
+            with open(f, encoding="utf-8") as fh:
+                old = json.load(fh)
+            if old.get("version") == 1 and isinstance(old.get("games"), dict):
+                cfg = old
         except Exception:
-            continue
-    return []
+            pass
+    cfg.setdefault("games", {})[appid] = list(dict.fromkeys(ids))
+    tmp = f + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=1)
+    os.replace(tmp, f)
 
 
-# ── 当前 Windows 版本（读 prefix 的 system.reg）──────────
+# ── 安装 / 应用 ───────────────────────────────────────
+def installed_ids(appid, pfx=None):
+    """这个 prefix 当前装了哪些组件（state 里记的）。"""
+    compat = _compat_for_prefix(pfx or wine_prefix_dir())
+    if not compat:
+        return []
+    from pathlib import Path as _P
+    return load_state(_P(compat)).get("components", []) or []
+
+
+def do_install(catalog, name, log=None):
+    """下载并解包一个组件进 store。返回 (文件数, overrides)。"""
+    comp = find(catalog, name)
+    if comp is None:
+        raise RuntimeError("目录里没有 %s" % name)
+    kind, why = support(comp)
+    if kind != "file":
+        raise RuntimeError(why or "需要 Windows 安装器")
+    return install(comp, store_dir(), cache_dir(), verbose=False)
+
+
+def do_apply(appid, ids, pfx=None, log=None):
+    """把选中的组件应用到 prefix。返回 (overrides, notes)。"""
+    pfx = pfx or wine_prefix_dir()
+    if not pfx:
+        raise RuntimeError("没找到 wine prefix")
+    compat = _compat_for_prefix(pfx)
+    write_selection(appid, ids)
+    from pathlib import Path as _P
+    return apply(_P(compat), appid, selection=selection_file(), store=store_dir(),
+                 pending=None, wait=None)
+
+
+# ── Windows 版本（改 prefix 的 system.reg）────────────────
 WIN_VER_MAP = [
     ("10.0", "win10"), ("6.3", "win81"), ("6.2", "win8"),
     ("6.1", "win7"), ("6.0", "vista"), ("5.2", "win2003"), ("5.1", "winXP"),
 ]
+_WIN_VER_CODE = {"winXP": "5.1", "win2003": "5.2", "vista": "6.0", "win7": "6.1",
+                 "win8": "6.2", "win81": "6.3", "win10": "10.0"}
 
 
 def read_current_windows_version():
-    """从 prefix 的 system.reg 里读 CurrentVersion，映射回 winXP/win7/win10。"""
+    """从 prefix 的 system.reg 读 CurrentVersion，映射回 winXP/win7/win10。"""
     pfx = wine_prefix_dir()
     if not pfx:
         return None
+    version = None
     try:
         with open(os.path.join(pfx, "system.reg"), "r", errors="replace") as f:
-            version, in_key = None, False
+            in_key = False
             for line in f:
                 if line.startswith("["):
                     in_key = "currentversion]" in line.lower()
@@ -720,40 +1831,18 @@ def read_current_windows_version():
         return None
     if not version:
         return None
-    for prefix, name in WIN_VER_MAP:
-        if version.startswith(prefix):
+    for pre, name in WIN_VER_MAP:
+        if version.startswith(pre):
             return name
     return None
 
 
 def write_windows_version(val):
-    """把 prefix 报成 val。
-
-    首选 wc-apply（走它的注册表写入 + 可撤销状态）；没有工具就直接改 system.reg。
-    """
-    if val not in ("winXP", "win7", "win10", "win81", "win8", "vista", "win2003"):
-        return False
-    wc_apply = find_tool("wc-apply")
-    pfx = wine_prefix_dir()
-    if wc_apply and pfx:
-        appid = _appid_for_prefix()
-        ok, _ = _run([wc_apply, "--select", appid, val])
-        if ok:
-            compat = _compat_for_prefix(pfx)
-            cmd = [wc_apply, "--prefix", pfx, appid] if compat is None else [wc_apply, compat, appid]
-            ok, _ = _run(cmd)
-            if ok:
-                return True
-    return _write_version_direct(val)
-
-
-def _write_version_direct(val):
-    """没有 wc-apply 时直接改 system.reg：只动 CurrentVersion 一行。"""
+    """只改 system.reg 里的 CurrentVersion 一行（够用且可逆）。"""
     pfx = wine_prefix_dir()
     if not pfx:
         return False
-    version = {"winXP": "5.1", "win2003": "5.2", "vista": "6.0", "win7": "6.1",
-               "win8": "6.2", "win81": "6.3", "win10": "10.0"}.get(val)
+    version = _WIN_VER_CODE.get(val)
     if not version:
         return False
     path = os.path.join(pfx, "system.reg")
@@ -779,18 +1868,6 @@ def _write_version_direct(val):
         return True
     except Exception:
         return False
-
-
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLayout,
-    QPushButton, QApplication, QWidget, QLabel, QLineEdit,
-    QScrollArea, QFrame, QSizePolicy, QScrollBar, QButtonGroup,
-)
-from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer
-from PyQt5.QtGui import (
-    QPainterPath, QRegion, QLinearGradient,
-    QColor, QPainter, QFont,
-)
 
 
 class FlowLayout(QLayout):
@@ -998,201 +2075,68 @@ QPushButton#setBtn:checked {
 """
 
 
-# ── 安装 / 应用 ──────────────────────────────────────
-def _run(cmd, timeout=1800):
-    """跑一条命令，返回 (ok, 输出)。找不到命令不抛异常，交给调用方报错。"""
+# ════════════════════════════════════════════════════════════
+#  数据层：catalog 拉取 / 下载安装 / 应用到 prefix
+# ════════════════════════════════════════════════════════════
+def catalog_components(force=False):
+    """拿组件目录（带 6 小时磁盘缓存）。"""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode == 0, (r.stdout or "") + (r.stderr or "")
-    except FileNotFoundError:
-        return False, "找不到命令：" + cmd[0]
-    except subprocess.TimeoutExpired:
-        return False, "超时（%ds）：%s" % (timeout, " ".join(cmd))
-    except Exception as ex:
-        return False, str(ex)
+        comps, src = fetch_catalog(force=force)
+        return comps, src, None
+    except Exception as e:
+        return [], "err", str(e)
 
 
-def install_component(pkg_path):
-    """把一个组件包装进当前 wine。
-
-    先试 wc-apply 的 store（组件已经在 store 里了，直接应用）；
-    没有就退回 DXVK 那套做法：把包装直接解到 windows/ 目录。
-    """
-    target = get_wine_target_dir()
-    if not target:
-        return False, "找不到 wine：请先确认 %s 里的 WINEPREFIX" % CONF_FILE
-
-    name = os.path.basename(pkg_path.rstrip("/"))
-    for suf in (".tar.xz", ".tar.gz"):
-        if name.endswith(suf):
-            name = name[:-len(suf)]
-            break
-
-    # 首选：组件进 store，再由 wc-apply 应用到 prefix（会写 overrides / 注册表）
-    wc_apply = find_tool("wc-apply")
-    wc_install = find_tool("wc-install")
-    if wc_apply:
-        store = store_dir()
-        if not os.path.isdir(os.path.join(store, name)) and wc_install:
-            ok, out = _run([wc_install, "--store", store, name])
-            if not ok:
-                return False, _first_line(out, "wc-install 失败")
-        if os.path.isdir(os.path.join(store, name)):
-            return _apply_one(name, wc_apply)
-        # store 里也没有、又不能下载，才会退到下面的解包
-        if wc_install:
-            return False, "组件 %s 不在 store 里，也下载不到" % name
-
-    if wc_apply:
-        pfx = wine_prefix_dir() or target
-        return _apply_one(name, wc_apply, pfx)
-
-    # 退回：直接解包到 windows/（和 DXVK 版本选择完全一样的做法）
-    # 包的顶层如果就是组件名（vcredist2022_dll/system32/...），先剥掉这一层，
-    # 否则会解成 windows/vcredist2022_dll/system32/ —— wine 认不到。
+def human_size(n):
     try:
-        os.makedirs(target, exist_ok=True)
-        strip = ["--strip-components=1"] if _tar_has_root(pkg_path, name) else []
-        flag = "-xJf" if pkg_path.endswith(".tar.xz") else "-xzf"
-        r = subprocess.run(["tar", flag, pkg_path, "-C", target] + strip,
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            return True, "已解包 %s 到 windows/" % name
-        err = (r.stderr or "解包失败").strip().splitlines()
-        return False, (err[-1] if err else "解包失败")
-    except Exception as ex:
-        return False, str(ex)
-
-
-def _tar_has_root(pkg_path, name):
-    """包里的顶层目录是不是就叫 name（那就该剥掉一层）。"""
-    flag = "-tJf" if pkg_path.endswith(".tar.xz") else "-tzf"
-    try:
-        r = subprocess.run(["tar", flag, pkg_path], capture_output=True, text=True)
-        if r.returncode != 0:
-            return False
-        roots = set()
-        for line in r.stdout.splitlines():
-            line = line.strip().lstrip("./")
-            if line:
-                roots.add(line.split("/")[0].rstrip("/"))
-        return roots == {name}
+        n = float(n)
     except Exception:
-        return False
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%.0f %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
 
 
+def _worker(fn):
+    """把 fn 丢到后台线程；返回 (thread, result_box)。"""
+    import threading
+    box = {"done": False, "result": None, "error": None}
 
-def _apply_one(name, wc_apply, pfx=None):
-    """把 store 里的一个组件加进当前 prefix 的选择并应用（不丢已有选择）。"""
+    def run():
+        try:
+            box["result"] = fn()
+        except Exception as e:
+            box["error"] = e
+        finally:
+            box["done"] = True
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, box
+
+
+def install_one(name, appid, catalog, pfx=None):
+    """下载 + 解包 + 应用到 prefix。返回一句给人看的话。"""
     pfx = pfx or wine_prefix_dir()
     if not pfx:
-        return False, "找不到当前 wine prefix"
-    appid = _appid_for_prefix()
-    cur = read_selection_ids(appid)
-    if name not in cur:
-        cur.append(name)
-    ok, out = _run([wc_apply, "--select", appid] + cur)
-    if not ok:
-        return False, _first_line(out, "写选择失败")
-    compat = _compat_for_prefix(pfx)
-    cmd = [wc_apply, "--prefix", pfx, appid] if compat is None else [wc_apply, compat, appid]
-    ok, out = _run(cmd)
-    if ok:
-        if name in cur and len(cur) > 1:
-            return True, "已安装 %s（共 %d 个）" % (name, len(cur))
-        return True, "已安装 %s" % name
-    return False, _first_line(out, "应用失败")
+        return False, "没找到 wine prefix"
+    do_install(catalog, name)
+    ids = read_selection(appid)
+    if name not in ids:
+        ids.append(name)
+    ov, notes = do_apply(appid, ids, pfx=pfx)
+    return True, "已安装 %s" % name
 
 
-def read_selection_ids(appid):
-    """读出当前给这个 appid 选中的组件 id 列表。
-
-    直接问 wc-apply --list（它自己知道选择文件在哪，路径不重复硬编码）。
-    """
-    wc_apply = find_tool("wc-apply")
-    if wc_apply:
-        ok, out = _run([wc_apply, "--list"])
-        if ok:
-            for line in out.splitlines():
-                parts = line.split(None, 1)
-                if len(parts) == 2 and parts[0] == str(appid):
-                    body = parts[1].strip()
-                    if body.startswith("(") or not body:
-                        return []
-                    return [x.strip() for x in body.split(",") if x.strip()]
-            return []
-    # wc-apply 不在就退回读文件
-    sel = os.environ.get("WC_SELECTION") or os.path.join(
-        os.path.expanduser("~"), ".config", "wc-apply", "selection.json")
-    try:
-        with open(sel, "r") as f:
-            cfg = json.load(f)
-        return list(cfg.get("games", {}).get(str(appid), []))
-    except Exception:
-        return []
-
-
-def _appid_for_prefix():
-    """给这个 prefix 编一个稳定的 id，用来存选择/状态。
-
-    用 prefix 路径的 hash，这样同一个 wine 每次都是同一个 id；
-    也和 wc-apply 的默认（<compat>/pfx）区分开。
-    """
-    pfx = wine_prefix_dir() or get_wine_target_dir() or "?"
-    h = 0
-    for ch in pfx:
-        h = (h * 131 + ord(ch)) & 0xFFFFFFFF
-    return str(h % 100000000)
-
-
-def _compat_for_prefix(pfx):
-    """给 wc-apply 造一个 <dir>/pfx 结构，让它能操作裸 .wine prefix。
-
-    wc-apply 内部写死了 pfx = compat / "pfx"；Wine 的裸 prefix 一般叫 .wine，
-    名字对不上。这里在 ~/.cache 下建一个稳定的批处理目录，里面放一个 pfx
-    符号链接指回真实 prefix；状态/备份文件也落在那儿，不动用户 prefix。
-    已经有 pfx 名字的（Proton/compatdata 那种）直接用，不折腾。
-    """
-    import hashlib
-    if os.path.basename(pfx.rstrip("/")) == "pfx":
-        return os.path.dirname(pfx.rstrip("/"))
-    key = hashlib.sha1(pfx.encode("utf-8")).hexdigest()[:12]
-    base = os.path.join(os.path.expanduser("~"), ".cache", "wincomponents", key)
-    os.makedirs(base, exist_ok=True)
-    link = os.path.join(base, "pfx")
-    try:
-        if os.path.islink(link):
-            if os.path.realpath(link) != os.path.realpath(pfx):
-                os.unlink(link)
-                os.symlink(pfx, link)
-        elif not os.path.exists(link):
-            os.symlink(pfx, link)
-    except Exception:
-        pass
-    return base
-
-
-def apply_selection(ids):
-    """把一组组件应用进当前 prefix，返回 (ok, 文本)。"""
-    wc_apply = find_tool("wc-apply")
-    if not wc_apply:
-        return False, "找不到 wc-apply（没装 wincomponents 工具）"
-    pfx = wine_prefix_dir()
+def remove_one(name, appid, pfx=None):
+    pfx = pfx or wine_prefix_dir()
     if not pfx:
-        return False, "找不到当前 wine prefix"
-    appid = _appid_for_prefix()
-    ok, out = _run([wc_apply, "--select", appid] + list(ids))
-    if not ok:
-        return False, _first_line(out, "写选择失败")
-    compat = _compat_for_prefix(pfx)
-    cmd = [wc_apply, "--prefix", pfx, appid] if compat is None else [wc_apply, compat, appid]
-    ok, out = _run(cmd)
-    if not ok:
-        return False, _first_line(out, "应用失败")
-    return True, "已应用 %d 个组件" % len(ids)
+        return False, "没找到 wine prefix"
+    ids = [i for i in read_selection(appid) if i != name]
+    do_apply(appid, ids, pfx=pfx)
+    return True, "已卸载 %s" % name
 
-
-# ── 一键常用组合 ──────────────────────────────────────
 BUNDLES = [
     ("常用库", ["vcredist2005_dll", "vcredist2008_dll", "vcredist2010_dll",
                 "vcredist2012_dll", "vcredist2013_dll", "vcredist2022_dll",
@@ -1202,7 +2146,7 @@ BUNDLES = [
     ("DirectX", ["d3dx9", "d3dx11", "d3dcompiler_42", "d3dcompiler_43",
                  "d3dcompiler_46", "d3dcompiler_47", "dx8vb", "xaudio2.7"]),
 ]
-WINDOWS_VERSIONS = [("winXP", "XP"), ("win7", "Win7"), ("win10", "Win10")]
+WIN_VER_BUTTONS = [("winXP", "XP"), ("win7", "Win7"), ("win10", "Win10")]
 
 
 class WinComponentsDialog(QDialog):
@@ -1211,10 +2155,41 @@ class WinComponentsDialog(QDialog):
         self._drag_pos = None
         self._drag_start_global = None
         self._dragging = False
-        self.all_versions = list_versions()
         self._server = None
+        self._busy = False
+
+        # 组件目录（带缓存）+ 当前 prefix 的 appid
+        self.catalog = []
+        self.catalog_src = "?"
+        self.catalog_err = None
+        self.prefix = wine_prefix_dir()
+        self.appid = appid_for_prefix(self.prefix) or "default"
+        self._installed = set(installed_ids(self.appid, self.prefix))
         self._cur_win = read_current_windows_version()
         self.init_ui()
+        self._refresh_catalog()
+
+    def _refresh_catalog(self, force=False):
+        """先把缓存的目录画出来，同时后台去拉最新的。"""
+        comps, src, err = catalog_components(force=False)
+        if comps:
+            self.catalog, self.catalog_src, self.catalog_err = comps, src, None
+            self._filter(self.search_edit.text())
+        t, box = _worker(lambda: catalog_components(force=force))
+
+        def check():
+            if not box["done"]:
+                QTimer.singleShot(150, check)
+                return
+            if box["error"]:
+                if not self.catalog:
+                    self.status_label.setText("组件目录拉取失败：%s" % box["error"])
+                return
+            comps, src, err = box["result"]
+            if comps:
+                self.catalog, self.catalog_src, self.catalog_err = comps, src, None
+                self._filter(self.search_edit.text())
+        QTimer.singleShot(150, check)
 
     def bind_single_instance_server(self, server):
         self._server = server
@@ -1283,7 +2258,7 @@ class WinComponentsDialog(QDialog):
         self.win_group = QButtonGroup(self)
         self.win_group.setExclusive(True)
         self.win_btns = {}
-        for i, (val, desc) in enumerate(WINDOWS_VERSIONS):
+        for i, (val, desc) in enumerate(WIN_VER_BUTTONS):
             b = QPushButton(desc)
             b.setObjectName("setBtn")
             b.setCheckable(True)
@@ -1351,11 +2326,41 @@ class WinComponentsDialog(QDialog):
             self.status_label.setText("切换版本失败")
 
     def _install_bundle(self, label, ids):
-        n = len(ids)
-        self.status_label.setText("正在装「%s」…（%d 个）" % (label, n))
+        if self._busy:
+            return
+        # 目录里存在的那几个才装
+        have = {c.get("name") for c in self.catalog}
+        todo = [i for i in ids if i in have][:8]
+        if not todo:
+            self.status_label.setText("「%s」里的组件目录里都没有" % label)
+            return
+        self._set_busy(True, "正在装「%s」…（%d 个）" % (label, len(todo)))
         QApplication.processEvents()
-        ok, msg = apply_selection(ids)
-        self.status_label.setText(msg if ok else "失败：" + msg)
+
+        def work():
+            done = []
+            for n in todo:
+                try:
+                    install_one(n, self.appid, self.catalog, pfx=self.prefix)
+                    done.append(n)
+                except Exception:
+                    pass
+            return done
+
+        t, box = _worker(work)
+
+        def check():
+            if not box["done"]:
+                QTimer.singleShot(250, check)
+                return
+            self._set_busy(False)
+            self._installed = set(installed_ids(self.appid, self.prefix))
+            self._filter(self.search_edit.text())
+            if box["error"]:
+                self.status_label.setText("「%s」失败：%s" % (label, box["error"]))
+            else:
+                self.status_label.setText("「%s」已装 %d 个" % (label, len(box["result"])))
+        QTimer.singleShot(250, check)
 
     def _fit_width(self):
         mbw = getattr(self, "_max_btn_w", 0)
@@ -1397,72 +2402,127 @@ class WinComponentsDialog(QDialog):
         low = text.lower().strip()
         count = 0
         maxw = 0
-        installed = set(read_installed())
-
-        for name, path in self.all_versions:
-            if low in name.lower():
-                label = name + ("  ✓" if name in installed else "")
-                btn = QPushButton(label)
-                btn.setObjectName("verBtn")
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-                btn.setToolTip("%s\n%s" % (name, path))
-                btn.clicked.connect(lambda checked, p=path: self._install_version(p))
-                btn.installEventFilter(self)
-                self.flow.addWidget(btn)
-                btn.ensurePolished()
-                maxw = max(maxw, btn.sizeHint().width())
-                count += 1
+        shown = 0
+        skipped = 0
+        for c in self.catalog:
+            name = c.get("name") or "?"
+            desc = (c.get("description") or "").replace("\n", " ").strip()
+            kind, why = component_kind(c)
+            if kind != "file":
+                skipped += 1
+                continue
+            blob = (name + " " + desc).lower()
+            if low and low not in blob:
+                continue
+            shown += 1
+            size = component_size(c)
+            mark = "  ✓" if name in self._installed else ""
+            btn = QPushButton(name + mark)
+            btn.setObjectName("verBtn")
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            tip = "%s\n%s\n%s" % (name, desc or "(无描述)",
+                                   ("大小 " + human_size(size)) if size else "")
+            if name in self._installed:
+                tip += "\n状态：已安装（再点一下重新装）"
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda checked, n=name: self._click_component(n))
+            btn.installEventFilter(self)
+            self.flow.addWidget(btn)
+            btn.ensurePolished()
+            maxw = max(maxw, btn.sizeHint().width())
+            count += 1
 
         self._max_btn_w = maxw
         if count:
-            self.status_label.setText("共 %d 个组件　·　%s" % (count, env_summary()))
+            extra = "　·　还有 %d 个需要 Windows 安装器" % skipped if skipped else ""
+            src_txt = {"cache": "本地缓存", "net": "在线"}.get(self.catalog_src, self.catalog_src)
+            self.status_label.setText("可安装 %d 个组件（%s）%s　·　%s"
+                                      % (count, src_txt, extra, env_summary()))
+        elif self.catalog:
+            self.status_label.setText("没有匹配的组件　·　%s" % env_summary())
         else:
-            self.status_label.setText("没有组件包（放进 %s）" % PKG_DIR)
+            self.status_label.setText("正在获取组件目录…")
         QTimer.singleShot(0, self._fit_width)
         QTimer.singleShot(0, self._update_scroll_size)
 
-    def _install_version(self, path):
-        """安装组件（无提示）"""
-        ok, msg = install_component(path)
-        self.all_versions = list_versions()
-        self._filter(self.search_edit.text())
-        self.status_label.setText(msg if ok else "失败：" + msg)
+    def _set_busy(self, busy, text=None):
+        self._busy = busy
+        if text:
+            self.status_label.setText(text)
+        for b in self.findChildren(QPushButton):
+            if b.objectName() in ("verBtn", "setBtn"):
+                b.setEnabled(not busy)
+
+    def _click_component(self, name):
+        """点卡片 = 没装就装、装了再点就重装（卸载走「删除…」）。"""
+        if self._busy:
+            return
+        self._set_busy(True, "正在安装 %s …（下载 + 解包）" % name)
+        QApplication.processEvents()
+
+        def work():
+            return install_one(name, self.appid, self.catalog, pfx=self.prefix)
+
+        t, box = _worker(work)
+
+        def check():
+            if not box["done"]:
+                QTimer.singleShot(200, check)
+                return
+            self._set_busy(False)
+            if box["error"]:
+                self.status_label.setText("安装 %s 失败：%s" % (name, box["error"]))
+                return
+            ok, msg = box["result"]
+            self._installed = set(installed_ids(self.appid, self.prefix))
+            self._filter(self.search_edit.text())
+            self.status_label.setText(msg if ok else "失败：" + msg)
+        QTimer.singleShot(200, check)
 
     def _delete_multi(self):
-        items = list(self.all_versions)
+        """卸载：勾选已装组件，从 prefix 里撤掉（会还原被覆盖的原文件）。"""
+        if self._busy:
+            return
+        items = [(n, n) for n in sorted(self._installed)]
         if not items:
-            self.status_label.setText("没有可删除的包")
+            self.status_label.setText("当前 prefix 没有装任何组件")
             return
         picks = _ask_delete_multi(items, self)
         if not picks:
             return
-        done = failed = 0
-        freed = 0
-        for path, name, is_current in picks:
-            try:
-                freed += os.path.getsize(path)
-            except Exception:
-                pass
-            ok, msg = delete_package(path, None, is_current)
-            if ok:
-                done += 1
+        # _ask_delete_multi 返回 [(path, name, is_current), ...]
+        names = []
+        for entry in picks:
+            if isinstance(entry, (tuple, list)):
+                names.append(entry[1] if len(entry) >= 2 else entry[0])
             else:
-                failed += 1
-        self.all_versions = list_versions()
-        self._filter(self.search_edit.text())
-        txt = "已删除 %d 个包（%s）" % (done, _human_size(freed))
-        if failed:
-            txt += "，%d 个失败" % failed
-        self.status_label.setText(txt)
+                names.append(entry)
+        if not names:
+            return
+        self._set_busy(True, "正在卸载 %d 个组件…" % len(names))
+        QApplication.processEvents()
 
-    def _delete_version(self, path, name, is_current=False):
-        ok, msg = delete_package(path, self, is_current)
-        if ok:
-            self.all_versions = list_versions()
+        def work():
+            ids = read_selection(self.appid)
+            for n in names:
+                ids = [i for i in ids if i != n]
+            do_apply(self.appid, ids, pfx=self.prefix)
+            return names
+
+        t, box = _worker(work)
+
+        def check():
+            if not box["done"]:
+                QTimer.singleShot(200, check)
+                return
+            self._set_busy(False)
+            if box["error"]:
+                self.status_label.setText("卸载失败：%s" % box["error"])
+                return
+            self._installed = set(installed_ids(self.appid, self.prefix))
             self._filter(self.search_edit.text())
-            self.status_label.setText(msg)
-        elif msg != "已取消":
-            self.status_label.setText(msg)
+            self.status_label.setText("已卸载 %d 个组件" % len(box["result"]))
+        QTimer.singleShot(200, check)
 
     def eventFilter(self, obj, event):
         if event.type() == event.MouseButtonPress:
@@ -1551,7 +2611,7 @@ def show_dialog(parent=None):
 
 def _selftest():
     """不启动界面，只打印它认到的环境 —— 装到设备上先跑这个确认路径对不对。"""
-    print("wincomponents GUI 自检")
+    print("wincomponents 自检")
     print("  wine_path.conf : %s  (%s)" % (CONF_FILE, "有" if os.path.isfile(CONF_FILE) else "没有"))
     name, prefix, root = read_wine_config()
     print("  当前 wine      : %s" % (name or "没认出来"))
@@ -1559,17 +2619,28 @@ def _selftest():
     print("  wine 根目录    : %s" % (root or "?"))
     print("  安装目标       : %s" % (get_wine_target_dir() or "?"))
     print("  Windows 版本   : %s" % (read_current_windows_version() or "?"))
-    print("  组件包目录     : %s  (%s)" % (PKG_DIR, "有" if os.path.isdir(PKG_DIR) else "没有"))
-    print("  组件 store     : %s  (%s)" % (store_dir(), "有" if os.path.isdir(store_dir()) else "没有"))
-    print("  wc-install     : %s" % (find_tool("wc-install") or "找不到"))
-    print("  wc-apply       : %s" % (find_tool("wc-apply") or "找不到"))
-    comps = list_versions()
-    print("  可用组件       : %d 个" % len(comps))
-    if comps:
-        print("    例：" + ", ".join(n for n, _ in comps[:12]))
-    inst = read_installed()
+    print("  组件 store     : %s" % store_dir())
+    print("  下载缓存       : %s" % cache_dir())
+    appid = appid_for_prefix(prefix)
+    print("  这台 prefix id : %s" % (appid or "?"))
+    inst = installed_ids(appid, prefix) if appid else []
     print("  已装组件       : %s" % (", ".join(inst) if inst else "（无）"))
-    print("  这台 prefix id : %s" % _appid_for_prefix())
+    print()
+    print("  拉取组件目录…")
+    comps, src, err = catalog_components(force=True)
+    if err:
+        print("  失败：%s" % err)
+        return 1
+    ok = [c for c in comps if component_kind(c)[0] == "file"]
+    no = [c for c in comps if component_kind(c)[0] != "file"]
+    print("  组件总数       : %d（来源 %s）" % (len(comps), src))
+    print("  可点即装       : %d 个" % len(ok))
+    print("  需要安装器     : %d 个（不列出）" % len(no))
+    if ok:
+        print("  例子：")
+        for c in ok[:10]:
+            print("    %-22s %10s  %s" % (c.get("name"), human_size(component_size(c)),
+                                          (c.get("description") or "")[:38]))
     return 0
 
 
