@@ -160,11 +160,15 @@ jobs:
           uname -m
           cat /etc/os-release | head -3
           gcc --version | head -1
+          # 先做 full upgrade：只 -Sy 会部分升级，ccache 升到新版却缺
+          # hiredis -> `libhiredis.so.1.4.0: cannot open shared object file`
+          pacman -Syu --noconfirm || true
           x86_64-w64-mingw32-gcc --version | head -1 || {
             echo "🔧 mingw-w64 缺失，安装中..."
-            pacman -Sy --noconfirm --needed mingw-w64-gcc
+            pacman -S --noconfirm --needed mingw-w64-gcc
             x86_64-w64-mingw32-gcc --version | head -1
           }
+          pacman -S --noconfirm --needed hiredis ccache 2>/dev/null || true
           nproc
 
           # ---------- ccache ----------
@@ -173,9 +177,21 @@ jobs:
             echo "✅ 使用 ccache 缓存"
             tar xf /tmp/ccache.tar.xz -C /root/.cache/
           fi
-          export USE_CCACHE=1
-          export CCACHE_DIR=/root/.cache/ccache
-          export PATH="/usr/lib/ccache/bin:$PATH"
+          # ccache 健全性检查：损坏就装直通 wrapper，别让编译全部 Error 127
+          if ccache --version >/dev/null 2>&1; then
+            echo "✅ ccache: $(ccache --version | head -1)"
+            export USE_CCACHE=1
+            export CCACHE_DIR=/root/.cache/ccache
+            export PATH="/usr/lib/ccache/bin:$PATH"
+          else
+            echo "⚠️ ccache 不可用 -> 禁用并装直通 wrapper"
+            export CCACHE_DISABLE=1
+            for d in /usr/local/bin /usr/bin /usr/sbin; do
+              mkdir -p "$d" 2>/dev/null || true
+              printf '%s\n' '#!/bin/sh' 'exec "$@"' > "$d/ccache" 2>/dev/null || true
+              chmod +x "$d/ccache" 2>/dev/null || true
+            done
+          fi
 
           # ---------- 源码 ----------
           rm -rf "$SRC" "$BUILD_DIR" "$PREFIX"
