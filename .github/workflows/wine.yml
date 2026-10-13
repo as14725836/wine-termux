@@ -225,7 +225,7 @@ jobs:
           echo "  nproc=$JOBS"
           echo "=============================================="
           uname -m
-          cat /etc/os-release | head -2
+          cat /etc/os-release | head -2 || true
 
           # ============================================================
           # 1. 安装 aarch64-linux 交叉工具链 + 构建依赖（pacman）
@@ -242,9 +242,9 @@ jobs:
                   aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc mingw-w64-gcc mingw-w64-crt mingw-w64-headers; }
 
           echo "--- 工具链验证 ---"
-          aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-gcc --version | head -1 || true
           x86_64-w64-mingw32-gcc --version | head -1 || true
-          gcc --version | head -1
+          gcc --version | head -1 || true
           ls -d /usr/aarch64-linux-gnu 2>/dev/null && echo "✅ aarch64 sysroot: /usr/aarch64-linux-gnu"
 
           # ============================================================
@@ -322,7 +322,7 @@ jobs:
               sub="${DEBPKG[$pkg]}"
               # 列 pool 目录，找 <pkg>_<ver>_arm64.deb
               idx="${MIRROR}/pool/main/${sub}/"
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | sort -V | tail -1)
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | sort -V | tail -1) || true
               if [ -z "$deb" ]; then
                 echo "  ⚠️ 未找到 $pkg (arm64)"
                 continue
@@ -331,7 +331,7 @@ jobs:
                 echo "  ✅ $deb"
                 # 解包 .deb（ar 归档 → data.tar.*）
                 ar x "$deb" 2>/dev/null || bsdtar xf "$deb" 2>/dev/null || true
-                dataf=$(ls data.tar.* 2>/dev/null | head -1)
+                dataf=$(ls data.tar.* 2>/dev/null | head -1) || true
                 if [ -n "$dataf" ]; then
                   tar xf "$dataf" -C "$ARM64_SYSROOT" --exclude='./usr/share/doc/*' \
                       --exclude='./usr/share/man/*' 2>/dev/null || true
@@ -529,7 +529,7 @@ jobs:
           rm -rf "$NLS_BACKUP"; mkdir -p "$NLS_BACKUP"
           cp -a nls/*.nls "$NLS_BACKUP/" 2>/dev/null || true
           test -f "$NATIVE_BUILD/tools/winebuild/winebuild" && echo "✅ winebuild ok"
-          ls -la "$NLS_BACKUP" | head
+          ls -la "$NLS_BACKUP" | head || true
 
           echo "✅ 阶段 4-7 完成"
 
@@ -596,9 +596,21 @@ jobs:
           grep -E '^  (Architecture|Wine version|Host CPU|Cross|NLS|X11|Vulkan)' config.log 2>/dev/null | head -20 || true
 
           echo "===== make -j$JOBS ====="
-          make -j"$JOBS" 2>&1 | tee /tmp/wine-arm64-build.log | tail -60
+          set +e
+          make -j"$JOBS" 2>&1 | tee /tmp/wine-arm64-build.log > /dev/null
+          MAKE_RC=${PIPESTATUS[0]}
+          set -e
+          tail -80 /tmp/wine-arm64-build.log || true
+          if [ "$MAKE_RC" -ne 0 ]; then
+            echo "❌ make 失败 (RC=$MAKE_RC)"
+            grep -nE '\[.*\] Error|error:|Error [0-9]+' /tmp/wine-arm64-build.log | tail -40 || true
+            exit "$MAKE_RC"
+          fi
+          echo "✅ make 成功"
           echo "===== make install ====="
-          make install 2>&1 | tail -30
+          make install > /tmp/wine-arm64-install.log 2>&1 || {
+            echo "❌ make install 失败"; tail -50 /tmp/wine-arm64-install.log; exit 1; }
+          tail -15 /tmp/wine-arm64-install.log || true
 
           # ---- NLS 兜底 ----
           if [ -d "$NLS_BACKUP" ]; then
@@ -634,7 +646,7 @@ jobs:
               -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
               .. > /tmp/fex-ec-cmake.log 2>&1 || { echo "⚠️ FEX ec cmake 失败"; tail -30 /tmp/fex-ec-cmake.log; }
             make -j"$JOBS" arm64ecfex > /tmp/fex-ec-make.log 2>&1 || { echo "⚠️ FEX ec make 失败"; tail -30 /tmp/fex-ec-make.log; }
-            ARM64EC_DLL=$(find "$FEX_SRC" -name 'libarm64ecfex.dll' 2>/dev/null | head -1)
+            ARM64EC_DLL=$(find "$FEX_SRC" -name 'libarm64ecfex.dll' 2>/dev/null | head -1) || true
             # i386 模拟 → libwow64fex.dll
             cd "$FEX_SRC/build_pe"
             cmake -DCMAKE_BUILD_TYPE=Release \
@@ -646,7 +658,7 @@ jobs:
               -DCMAKE_DISABLE_FIND_PACKAGE_fmt=TRUE \
               .. > /tmp/fex-pe-cmake.log 2>&1 || { echo "⚠️ FEX pe cmake 失败"; tail -30 /tmp/fex-pe-cmake.log; }
             make -j"$JOBS" wow64fex > /tmp/fex-pe-make.log 2>&1 || { echo "⚠️ FEX pe make 失败"; tail -30 /tmp/fex-pe-make.log; }
-            WOW64_DLL=$(find "$FEX_SRC" -name 'libwow64fex.dll' 2>/dev/null | head -1)
+            WOW64_DLL=$(find "$FEX_SRC" -name 'libwow64fex.dll' 2>/dev/null | head -1) || true
             echo "ARM64EC_DLL=$ARM64EC_DLL"
             echo "WOW64_DLL=$WOW64_DLL"
             if [ -n "$ARM64EC_DLL" ] || [ -n "$WOW64_DLL" ]; then
@@ -702,8 +714,8 @@ jobs:
             echo "wine_branch    : $WINE_BRANCH"
             echo "archs          : $WINE_ARCHS"
             echo "host           : $(uname -m)"
-            echo "cc (unix)      : $(aarch64-linux-gnu-gcc --version | head -1)"
-            echo "cc (pe)        : $(arm64ec-w64-mingw32-clang --version | head -1)"
+            echo "cc (unix)      : $(aarch64-linux-gnu-gcc --version | head -1)" || true
+            echo "cc (pe)        : $(arm64ec-w64-mingw32-clang --version | head -1)" || true
             echo "wine_commit    : $WINE_COMMIT"
             echo "39bit va       : $ENABLE_39BIT"
             echo "noexec fallback: $ENABLE_NOEXEC"
