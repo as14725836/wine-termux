@@ -27,20 +27,43 @@ wincomponents               # 开界面
 
 
 
-## 悬停提示
+## 悬停提示（半透明浮层）
 
-鼠标/长按停在卡片或状态行上会弹提示（组件描述、会装哪些 DLL、大小、完整路径）。
+鼠标/长按停在卡片或状态行上会弹一个**半透明**的提示：能透出底下的界面，
+不是一块实心黑方块。四角也是真透明（圆角处不会露黑边）。
 
-提示的样式是**显式指定**的（`QToolTip_STYLE`，深蓝底 + 浅蓝描边）：
-
-```python
-app.setStyleSheet(QToolTip_STYLE)     # 必须在 QApplication 上设
+```
+┌─────────────────────────────┐
+│ d3dx9                       │   ← 圆角，透出背景
+│ Microsoft d3dx9 DLLs from   │
+│ DirectX 9 redistributable   │
+│ 大小 18.7 MB                │
+│ 装这些：d3dx9_24, d3dx9_25, │
+│ d3dx9_26, d3dx9_27 等 20 个 │
+│ 点一下安装                  │
+└─────────────────────────────┘
 ```
 
-⚠️ 这一步不能省。`QToolTip` 是独立的顶层窗口，把样式挂在 dialog 上对它**无效** ——
-不设的话在自绘的深色窗口上会渲染成一块不透明的**纯黑方块**。
+### 为什么不用内建的 QToolTip
 
-另外提示里的长文本会自动折行（每行 ≤ 36~44 字符），免得在窄屏上被拉成一根横贯屏幕的黑条。
+Qt 会先把 `QToolTip` 画到一张**不透明位图**上，stylesheet 里写
+`background-color: rgba(...)` 也会被拍平成实色 —— 在深色界面上就是一块
+黑方块。而且 `QToolTip` 是独立顶层窗口，把样式挂在 dialog 上对它无效。
+
+所以这里自己实现了一个 `HoverTip`：
+
+```python
+class HoverTip(QWidget):
+    setAttribute(Qt.WA_TranslucentBackground, True)   # ← 真半透明
+    setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
+    def paintEvent(...):  # 自绘圆角矩形，背景 alpha≈208
+```
+
+- 背景 `rgba(24,34,56,208)`，描边 `rgba(120,190,235,160)`
+- 卡片悬停走 `enterEvent`/`leaveEvent`
+- 按钮和状态行走 `eventFilter`（`_attach_hover_tip`）
+- 自动定位：优先摆在控件下方，放不下就翻到上方，再不行贴边夹回
+- 长路径按 `/` 折行、长文本按空格/逗号折行，不会被拉成一根横条
 
 ## 顶栏
 
