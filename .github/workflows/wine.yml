@@ -727,6 +727,22 @@ jobs:
             patch -p1 --forward < "$WS/wine-box64-compat.patch" || echo "  box64-compat 跳过"
           fi
 
+          # 5.8 proton-wine 源码修补：server.c 调用 esync_init() 但未 include esync.h
+          #     （proton_11.0 分支缺陷，上游靠间接 include；交叉编译下暴露）
+          if [ -f dlls/ntdll/unix/server.c ]; then
+            if grep -q 'esync_init' dlls/ntdll/unix/server.c && \
+               ! grep -q '#include "esync.h"' dlls/ntdll/unix/server.c; then
+              echo "--- 修补 ntdll/unix/server.c: 补 esync.h include ---"
+              sed -i 's|#include "fsync.h"|#include "fsync.h"\n#include "esync.h"|' dlls/ntdll/unix/server.c || true
+              grep -n 'include "esync.h"\|include "fsync.h"' dlls/ntdll/unix/server.c | head -3 || true
+            fi
+          fi
+          # fsync.c/esync.c 若 do_esync/do_fsync 缺失符号，同样补 include
+          for f in dlls/ntdll/unix/esync.c dlls/ntdll/unix/fsync.c; do
+            [ -f "$f" ] || continue
+            :
+          done
+
           # 5.9 清理补丁残留（不因 .rej 中止，但打印出来）
           if find . -name '*.rej' | grep -q .; then
             echo "⚠️ 存在未应用的补丁片段（已清理，不影响构建）:"
