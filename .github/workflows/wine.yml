@@ -317,6 +317,35 @@ jobs:
               [libvulkan-dev]="v/vulkan-loader"
               [libwayland-dev]="w/wayland"
             )
+            # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
+            # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
+            declare -A RUNPKG=(
+              [libfreetype6]="f/freetype"
+              [libfontconfig1]="f/fontconfig"
+              [libpng16-16]="libp/libpng1.6"
+              [libexpat1]="e/expat"
+              [libglib2.0-0t64]="g/glib2.0"
+              [libx11-6]="libx/libx11"
+              [libxext6]="libx/libxext"
+              [libxi6]="libx/libxi"
+              [libxcursor1]="libx/libxcursor"
+              [libxrandr2]="libx/libxrandr"
+              [libxfixes3]="libx/libxfixes"
+              [libxcomposite1]="libx/libxcomposite"
+              [libxdamage1]="libx/libxdamage"
+              [libxxf86vm1]="libx/libxxf86vm"
+              [libxrender1]="libx/libxrender"
+              [libxinerama1]="libx/libxinerama"
+              [libxshmfence1]="libx/libxshmfence"
+              [libxkbcommon0]="libx/libxkbcommon"
+              [libvulkan1]="v/vulkan-loader"
+              [libdbus-1-3]="d/dbus"
+              [libunwind8]="libu/libunwind"
+              [libwayland-client0]="w/wayland"
+              [libwayland-server0]="w/wayland"
+              [libwayland-cursor0]="w/wayland"
+              [libwayland-egl1]="w/wayland"
+            )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
               sub="${DEBPKG[$pkg]}"
@@ -341,6 +370,23 @@ jobs:
               fi
             done
             echo "ℹ️ 解出 $fetched 个 arm64 dev 包到 $ARM64_SYSROOT"
+            # ---- 拉取 runtime 包，补全 .so.N 实体 ----
+            for pkg in "${!RUNPKG[@]}"; do
+              sub="${RUNPKG[$pkg]}"
+              idx="${MIRROR}/pool/main/${sub}/"
+              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_arm64\.deb" | grep -v 'dbgsym' | sort -V | tail -1)
+              if [ -z "$deb" ]; then echo "  ⚠️ runtime 未找到 $pkg"; continue; fi
+              if curl -fsL -o "$deb" "${idx}${deb}"; then
+                ar x "$deb" 2>/dev/null || bsdtar xf "$deb" 2>/dev/null || true
+                dataf=$(ls data.tar.* 2>/dev/null | head -1)
+                if [ -n "$dataf" ]; then
+                  tar xf "$dataf" -C "$ARM64_SYSROOT" --exclude='./usr/share/doc/*' \
+                      --exclude='./usr/share/man/*' 2>/dev/null || true
+                  rm -f "$dataf" debian-binary control.tar.* 2>/dev/null || true
+                fi
+              fi
+            done
+            echo "ℹ️ runtime 包补齐完成"
             # 关键：把抽出的 arm64 头文件/库合并进 gcc 的默认 sysroot
             #        /usr/aarch64-linux-gnu，否则 aarch64-linux-gnu-gcc 看不到它们。
             ARCH_SYSROOT=/usr/aarch64-linux-gnu
