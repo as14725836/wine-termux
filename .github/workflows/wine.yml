@@ -399,6 +399,8 @@ jobs:
               [libjpeg62-turbo]="libj/libjpeg-turbo"
               [libbrotli1]="b/brotli"
               [libpulse0]="p/pulseaudio"
+              [libpulse-mainloop-glib0]="p/pulseaudio"
+              [libpulse-dev]="p/pulseaudio"
               [libasyncns0]="liba/libasyncns"
               [libsndfile1]="libs/libsndfile"
               [libflac12]="f/flac"
@@ -511,6 +513,12 @@ jobs:
                 echo "❌ 链接自检: -lfreetype 失败"; head -30 /tmp/ftchk.err || true
               fi
               ls -la "$ARCH_SYSROOT"/lib64/libfreetype.so* "$ARCH_SYSROOT"/lib/libfontconfig.so* 2>&1 | head -6 || true
+              echo "--- pulse 相关 ---"
+              ls -la "$ARCH_SYSROOT"/lib/libpulse.so* "$ARCH_SYSROOT"/include/pulse/pulseaudio.h 2>&1 | head -8 || true
+              ls "$ARCH_SYSROOT"/lib/pkgconfig/libpulse*.pc 2>&1 | head -5 || true
+              if [ -f "$ARCH_SYSROOT/lib/pkgconfig/libpulse.pc" ]; then
+                echo "--- libpulse.pc ---"; cat "$ARCH_SYSROOT/lib/pkgconfig/libpulse.pc"
+              fi
             fi
             touch "${ARM64_SYSROOT}/.done"
             cd /tmp
