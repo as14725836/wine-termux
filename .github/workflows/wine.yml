@@ -347,7 +347,7 @@ jobs:
               [libpulse-dev]="p/pulseaudio"
               [libasound2-dev]="a/alsa-lib"
               [libdrm-dev]="libd/libdrm"
-              [libegl-dev]="libe/libegl"
+              [libegl-dev]="libg/libglvnd"
               [libglvnd-dev]="libg/libglvnd"
               [libgl-dev]="libg/libglvnd"
               [libgles-dev]="libg/libglvnd"
@@ -416,7 +416,7 @@ jobs:
               [libdrm-intel1]="libd/libdrm"
               [libdrm-nouveau2]="libd/libdrm"
               [libdrm-radeon1]="libd/libdrm"
-              [libegl1]="libe/libegl"
+              [libegl1]="libg/libglvnd"
               [libgles2]="libg/libglvnd"
               [libglx0]="libg/libglvnd"
               [libgl1]="libg/libglvnd"
@@ -839,6 +839,19 @@ jobs:
           export FREETYPE_CFLAGS="-I/usr/aarch64-linux-gnu/include/freetype2"
           export FONTCONFIG_CFLAGS="-I/usr/aarch64-linux-gnu/include"
           export FONTCONFIG_LIBS="-lfontconfig"
+          # EGL/GL/drm soname 交叉缓存（proton win32u/opengl.c 需要 SONAME_LIBEGL）
+          export ac_cv_lib_soname_EGL=libEGL.so.1
+          export ac_cv_lib_soname_GL=libGL.so.1
+          export ac_cv_lib_soname_GLX=libGLX.so.0
+          export ac_cv_lib_soname_OpenGL=libOpenGL.so.0
+          export ac_cv_lib_soname_drm=libdrm.so.2
+          export ac_cv_lib_EGL_eglGetProcAddress=yes
+          export ac_cv_lib_drm_drmGetVersion=yes
+          export ac_cv_header_EGL_egl_h=yes
+          export ac_cv_header_EGL_eglext_h=yes
+          export ac_cv_header_GL_gl_h=yes
+          export ac_cv_header_xf86drm_h=yes
+
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__subsystem_console__Wl__WX=yes
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__no_default_config=yes
 
