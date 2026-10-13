@@ -44,6 +44,28 @@ wincomponents               # 开界面
 └─────────────────────────────┘
 ```
 
+
+### 内建 tooltip 是彻底关掉的
+
+自绘浮层只是"额外加了一个"，如果某个控件还留着 `setToolTip(...)`，
+Qt 会**同时**弹它自己的黑方块 —— 而且往往比自绘浮层先出现。
+
+所以这里做了两层：
+
+1. 所有控件一律 `setToolTip("")`（含卡片、状态行、按钮、删除对话框的复选框）
+2. `QApplication` 上装一个全局过滤器，把所有 `QEvent.ToolTip` 直接吃掉：
+
+```python
+class _NoToolTipFilter(QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ToolTip:
+            QToolTip.hideText()
+            return True          # 不让 Qt 自己弹
+        return False
+```
+
+自绘的 `HoverTip` 走 `enterEvent` / `eventFilter`，不依赖 `ToolTip` 事件，不受影响。
+
 ### 为什么不用内建的 QToolTip
 
 Qt 会先把 `QToolTip` 画到一张**不透明位图**上，stylesheet 里写
