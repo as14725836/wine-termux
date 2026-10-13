@@ -346,6 +346,7 @@ jobs:
               [libbrotli-dev]="b/brotli"
               [libpulse-dev]="p/pulseaudio"
               [libasound2-dev]="a/alsa-lib"
+              [libdrm-dev]="libd/libdrm"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -404,6 +405,11 @@ jobs:
               [libpulse-dev]="p/pulseaudio"
               [libasound2]="a/alsa-lib"
               [libasound2t64]="a/alsa-lib"
+              [libdrm2]="libd/libdrm"
+              [libdrm-amdgpu1]="libd/libdrm"
+              [libdrm-intel1]="libd/libdrm"
+              [libdrm-nouveau2]="libd/libdrm"
+              [libdrm-radeon1]="libd/libdrm"
               [libasound2-data]="a/alsa-lib"
               [libasyncns0]="liba/libasyncns"
               [libsndfile1]="libs/libsndfile"
