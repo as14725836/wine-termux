@@ -1,0 +1,548 @@
+name: Compile FEX (BCC chroot, arm64ec + wow64)
+
+# ============================================================
+# 在 wine-termux 的 BCC（Arch Linux chroot）构建环境里编译 FEX，
+# 产出与 wine_tkg_wow64.yml 那套 Wine 相同环境 / ABI 的模拟器 DLL：
+#
+#   libarm64ecfex.dll   x86_64 模拟（HODLL64）
+#   libwow64fex.dll     i386   模拟（HODLL）
+#   wowbox64.dll        box64 的 WOW64 CPU DLL（可选，与上面同目录）
+#
+# 构建环境与 wine_tkg_wow64.yml（run 38215558310 用的那套）保持一致：
+#   wine-bcc.tar.xz  →  /tmp/archlinux   →  mount.sh 挂 /proc /sys /dev
+#   sudo chroot archlinux /bin/build-fex.sh
+# 这样 FEX 与 Wine 用同一套 rootfs / ccache / 目录约定，产物可直接配套。
+#
+# FEX 需要 ARM64EC 的 PE 交叉工具链，Arch 自带的 mingw-w64 是 GCC、
+# 不支持 arm64ec，因此 chroot 内额外装 llvm-mingw（bylaws 版）。
+#
+# 安装位置（Termux glibc）：<wine 根>/lib/wine/aarch64-windows/
+# 包内附 fex-env.sh：用 FEX_THUNKHOSTLIBS / FEX_THUNKGUESTLIBS /
+# FEX_ROOTFS / FEX_THUNKCONFIG / FEX_PORTABLE 覆盖 FEX 内置的 /usr 路径。
+# ============================================================
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      fex_repo:
+        description: 'FEX 仓库（留空则用默认：Wine 推荐 AndreRH/FEX）'
+        required: false
+        default: 'AndreRH/FEX'
+        type: string
+      fex_ref:
+        description: 'FEX 版本：分支 / tag / commit（留空则按仓库自动：AndreRH/FEX→arm64ec，FEX-Emu/FEX→main）'
+        required: false
+        default: ''
+        type: string
+      llvm_mingw_distro:
+        description: 'llvm-mingw 发行方（bylaws 的 ARM64EC 支持完整）'
+        required: false
+        default: 'bylaws'
+        type: choice
+        options:
+          - bylaws
+          - mstorsjo
+      llvm_mingw_version:
+        description: 'llvm-mingw 版本，latest 表示取最新 release'
+        required: false
+        default: 'latest'
+        type: string
+      build_arm64ecfex:
+        description: '构建 libarm64ecfex.dll（x86_64 模拟，WOW64 必需）'
+        required: false
+        default: true
+        type: boolean
+      build_wow64fex:
+        description: '构建 libwow64fex.dll（i386 模拟）'
+        required: false
+        default: true
+        type: boolean
+      include_wowbox64:
+        description: '一并打包 box64 的 wowbox64.dll'
+        required: false
+        default: true
+        type: boolean
+      box64_repo:
+        description: 'box64 开发版仓库'
+        required: false
+        default: 'as14725836/termux-glibc-box64'
+        type: string
+      box64_release_tag:
+        description: 'box64 开发版 Release tag（留空 = 自动取最新 box64-dev-*）'
+        required: false
+        default: ''
+        type: string
+      version_label:
+        description: '可选：手动指定版本号（留空则自动探测，例如填 FEX-2605）'
+        required: false
+        default: ''
+        type: string
+      jobs:
+        description: '并行编译线程'
+        required: false
+        default: '8'
+        type: string
+      build_type:
+        description: 'CMAKE_BUILD_TYPE（Release = 与上游一致；RelWithDebInfo = 带 DWARF 便于排障）'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+      pkg_suffix:
+        description: '产物后缀（避免覆盖同名 Release）'
+        required: false
+        default: ''
+        type: string
+      publish_release:
+        description: '构建成功后发布 GitHub Release'
+        required: false
+        default: true
+        type: boolean
+
+  push:
+    paths:
+      - '.github/workflows/fex.yml'
+      - '.github/workflows/fex.yaml'
+      - 'ci/fex/**'
+      - 'patches/fex/**'
+
+  schedule:
+    # 每周一 02:00 UTC 跟一次上游（避免过于频繁地拉 llvm-mingw + FEX）
+    - cron: "0 2 * * 1"
+
+jobs:
+  FEX:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 1. 准备 BCC chroot（与 wine_tkg_wow64.yml 完全相同的环境）
+      # ============================================================
+      - name: Clone project & setup rootfs (BCC)
+        run: |
+          set -eux
+          cat > ~/.gitconfig << EOF
+          [fetch]
+            parallel = $(nproc)
+          [submodule]
+            fetchJobs = $(nproc)
+          EOF
+
+          cd /tmp
+          curl -L -o wine-bcc.tar.xz \
+            https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
+          sudo tar xf wine-bcc.tar.xz || { echo "❌ Extract failed"; exit 1; }
+          if [ ! -d "archlinux" ]; then
+            echo "❌ Expected 'archlinux' directory not found after extract!"
+            exit 1
+          fi
+
+          # 把仓库内容带进 chroot（供 ci/fex 下的辅助脚本使用）
+          sudo cp -r -p "$GITHUB_WORKSPACE"/* /tmp/archlinux/tmp/ 2>/dev/null || true
+          sudo mkdir -p /tmp/archlinux/tmp/wine-termux
+          for f in patch.sh set-tkg-cfg.sh mount.sh; do
+            if [ -f "$GITHUB_WORKSPACE/$f" ]; then
+              sudo cp "$GITHUB_WORKSPACE/$f" /tmp/archlinux/tmp/wine-termux/ || true
+            fi
+          done
+          echo "BCC rootfs ready: $(ls -d /tmp/archlinux)"
+
+      # ============================================================
+      # 2. chroot 内预装依赖 + llvm-mingw（写进 rootfs，供 build-fex.sh 用）
+      # ============================================================
+      - name: Prepare chroot (deps + llvm-mingw)
+        env:
+          LLVM_MINGW_DISTRO: ${{ inputs.llvm_mingw_distro || 'bylaws' }}
+          LLVM_MINGW_VERSION: ${{ inputs.llvm_mingw_version || 'latest' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          cat > /tmp/archlinux/tmp/prepare-fex-deps.sh << 'EOS'
+          #!/bin/bash
+          set -eux
+          GH_TOKEN="GH_TOKEN_PLACEHOLDER"
+          # Arch 基础依赖：FEX 编译需要 cmake/ninja/python + 一堆库
+          pacman -Sy --noconfirm --needed \
+            base-devel cmake ninja python python-pip git curl wget \
+            xz unzip file ccache || true
+          pacman -S --noconfirm --needed nasm pkgconf || true
+
+          # ---- llvm-mingw（ARM64EC PE 交叉工具链）----
+          DISTRO="LLVM_MINGW_DISTRO_PLACEHOLDER"
+          VER="LLVM_MINGW_VERSION_PLACEHOLDER"
+          if [ "${DISTRO}" = "bylaws" ]; then REPO="bylaws/llvm-mingw"; else REPO="mstorsjo/llvm-mingw"; fi
+
+          if [ "${VER}" = "latest" ] || [ -z "${VER}" ]; then
+            VER="$(curl -sSL --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+                   "https://api.github.com/repos/${REPO}/releases/latest" \
+                   | python3 -c 'import json,sys;print(json.load(sys.stdin).get("tag_name") or "")' 2>/dev/null || true)"
+          fi
+          if [ -z "${VER}" ]; then echo "FATAL: 拿不到 ${REPO} release tag"; exit 1; fi
+
+          DIR="llvm-mingw-${VER}-ucrt-ubuntu-22.04-x86_64"
+          URL="https://github.com/${REPO}/releases/download/${VER}/${DIR}.tar.xz"
+          echo "llvm-mingw: ${URL}"
+          mkdir -p /opt
+          cd /opt
+          if [ ! -d "/opt/${DIR}" ]; then
+            curl -L --retry 3 -o "${DIR}.tar.xz" "${URL}"
+            tar -xJf "${DIR}.tar.xz"
+            rm -f "${DIR}.tar.xz"
+          fi
+          ln -sfn "/opt/${DIR}" /opt/llvm-mingw
+
+          echo "=== 工具链自检 ==="
+          for T in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang; do
+            printf '%-38s ' "${T}"
+            /opt/llvm-mingw/bin/${T} --version | head -1 || echo MISSING
+          done
+          EOS
+          # chroot 不继承宿主环境变量，把 token 与 llvm-mingw 选择用 sed 烧进脚本
+          sed -i "s|GH_TOKEN_PLACEHOLDER|${{ secrets.GITHUB_TOKEN }}|g; \
+                  s|LLVM_MINGW_DISTRO_PLACEHOLDER|${{ inputs.llvm_mingw_distro || 'bylaws' }}|g; \
+                  s|LLVM_MINGW_VERSION_PLACEHOLDER|${{ inputs.llvm_mingw_version || 'latest' }}|g" \
+                 /tmp/archlinux/tmp/prepare-fex-deps.sh
+          sudo chmod +x /tmp/archlinux/tmp/prepare-fex-deps.sh
+          echo "--- 注入后的 llvm-mingw 选择 ---"
+          grep -nE 'DISTRO=|VER=' /tmp/archlinux/tmp/prepare-fex-deps.sh | head
+
+          cd /tmp
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          sudo chroot archlinux /tmp/prepare-fex-deps.sh
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+
+      # ============================================================
+      # 3. 生成 chroot 内的 FEX 构建脚本
+      # ============================================================
+      - name: Write build-fex.sh into chroot
+        run: |
+          set -eux
+          cat > /tmp/build-fex.sh << 'EOS'
+          #!/bin/bash
+          set -eux
+          export PATH="/opt/llvm-mingw/bin:${PATH}"
+          export FEX_REPO="__FEX_REPO__"
+          export FEX_REF="__FEX_REF__"
+          export FEX_COMMIT=""
+          export FEX_DESC=""
+          JOBS="__JOBS__"
+          BUILD_TYPE="__BUILD_TYPE__"
+
+          echo "=================================================="
+          echo " FEX build inside BCC chroot"
+          echo " repo=${FEX_REPO}  ref=${FEX_REF}"
+          echo "=================================================="
+
+          # ---- 获取源码 ----
+          rm -rf /opt/fex-src
+          mkdir -p /opt/fex-src
+          cd /opt/fex-src
+          git init -q
+          git remote add origin "https://github.com/${FEX_REPO}.git"
+          git config advice.detachedHead false
+
+          IS_SHA=0
+          case "${FEX_REF}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) IS_SHA=1 ;; esac
+          if [ "${IS_SHA}" = "0" ] && ! git ls-remote --exit-code origin "${FEX_REF}" "refs/tags/${FEX_REF}" >/dev/null 2>&1; then
+            echo "FATAL: 远端 ${FEX_REPO} 找不到 ref: ${FEX_REF}"; exit 1
+          fi
+          if ! git fetch origin "${FEX_REF}"; then
+            if ! git fetch --depth=250 origin "${FEX_REF}"; then git fetch --depth=1 origin "${FEX_REF}"; fi
+          fi
+          git checkout -q FETCH_HEAD
+          git fetch --tags origin >/dev/null 2>&1 || true
+          git submodule update --init --recursive --depth=1 || git submodule update --init --recursive
+
+          FEX_COMMIT="$(git rev-parse --short HEAD)"
+          export FEX_COMMIT
+          git log -1 --format='commit %H%nsubject %s' || true
+
+          # ---- 旧版本 fmt 兼容补丁 ----
+          for H in External/fmt/include/fmt/base.h External/fmt/include/fmt/format.h External/fmt/include/fmt/core.h; do
+            if [ -f "${H}" ] && ! grep -q '#include <cstdlib>' "${H}"; then
+              sed -i '1i #include <cstdlib>' "${H}"
+            fi
+          done
+
+          # ---- 定位 mingw 工具链 ----
+          TOOLCHAIN_FILE="$(find /opt/fex-src -path '*/Data/CMake/toolchain_mingw.cmake' -print -quit 2>/dev/null || true)"
+          [ -n "${TOOLCHAIN_FILE}" ] || TOOLCHAIN_FILE="$(find /opt/fex-src -name 'toolchain_mingw.cmake' -print -quit 2>/dev/null || true)"
+          if [ -z "${TOOLCHAIN_FILE}" ]; then
+            echo "FATAL: 找不到 toolchain_mingw.cmake（该版本不支持 ARM64EC PE 交叉构建？）"; exit 1
+          fi
+          TOOLCHAIN_REL="${TOOLCHAIN_FILE#/opt/fex-src/}"
+          echo "TOOLCHAIN_REL=${TOOLCHAIN_REL}"
+
+          # ---- 版本号 ----
+          FEX_TAG=""
+          [ -n "__VERSION_LABEL__" ] && FEX_TAG="__VERSION_LABEL__"
+          [ -z "${FEX_TAG}" ] && FEX_TAG="$(git describe --tags --match 'FEX-*' --abbrev=7 2>/dev/null || true)"
+          [ -z "${FEX_TAG}" ] && FEX_TAG="$(git describe --tags --match 'hangover-*' --abbrev=7 2>/dev/null || true)"
+          [ -z "${FEX_TAG}" ] && FEX_TAG="$(git describe --tags --always --abbrev=7 2>/dev/null || true)"
+          if [ -z "${FEX_TAG}" ]; then FEX_TAG="$(date -u +%Y%m%d)-g${FEX_COMMIT}"; fi
+          export FEX_DESC="${FEX_TAG}"
+          echo "FEX version = ${FEX_DESC}"
+
+          # ---- 兼容旧版：补 libclang_rt.builtins-arm64ec.a ----
+          BUILTINS_DIR=""
+          for CAND in \
+            "$(find /opt/llvm-mingw -type d -path '*lib/clang*' -name windows -print -quit 2>/dev/null || true)" \
+            "$(dirname "$(find /opt/llvm-mingw -name 'libclang_rt.builtins-aarch64.a' -print -quit 2>/dev/null || true)")"
+          do
+            if [ -n "${CAND}" ] && [ -d "${CAND}" ]; then BUILTINS_DIR="${CAND}"; break; fi
+          done
+          if [ -n "${BUILTINS_DIR}" ] && [ ! -e "${BUILTINS_DIR}/libclang_rt.builtins-arm64ec.a" ] \
+             && [ -e "${BUILTINS_DIR}/libclang_rt.builtins-aarch64.a" ]; then
+            cp -f "${BUILTINS_DIR}/libclang_rt.builtins-aarch64.a" "${BUILTINS_DIR}/libclang_rt.builtins-arm64ec.a"
+          fi
+
+          export USE_CACHE="${USE_CACHE:-1}"
+          export CCACHE_DIR="${CCACHE_DIR:-/root/.cache/ccache}"
+          [ "${USE_CACHE}" = "1" ] && [ -f /tmp/ccache.tar.xz ] && { mkdir -p ~/.cache; tar xf /tmp/ccache.tar.xz -C ~/.cache/ || true; }
+
+          # ================= arm64ecfex (x86_64 模拟) =================
+          if [ "__BUILD_EC__" = "true" ]; then
+            rm -rf build_ec; mkdir -p build_ec; cd build_ec
+            cmake \
+              -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+              -DCMAKE_TOOLCHAIN_FILE="../${TOOLCHAIN_REL}" \
+              -DENABLE_LTO=False -DENABLE_ASSERTIONS=False \
+              -DTUNE_ARCH=generic -DTUNE_CPU=none \
+              -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
+              -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              ..
+            make -j"${JOBS}" arm64ecfex
+            test -f Bin/libarm64ecfex.dll
+            if [ "${BUILD_TYPE}" = "Release" ] && command -v llvm-strip >/dev/null 2>&1; then
+              llvm-strip --strip-all Bin/libarm64ecfex.dll || true
+            fi
+            ls -lh Bin/libarm64ecfex.dll
+            cd /opt/fex-src
+          fi
+
+          # ================= wow64fex (i386 模拟) =================
+          if [ "__BUILD_WOW64__" = "true" ]; then
+            rm -rf build_pe; mkdir -p build_pe; cd build_pe
+            cmake \
+              -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+              -DCMAKE_TOOLCHAIN_FILE="../${TOOLCHAIN_REL}" \
+              -DENABLE_LTO=False -DENABLE_ASSERTIONS=False \
+              -DTUNE_ARCH=generic -DTUNE_CPU=none \
+              -DMINGW_TRIPLE=aarch64-w64-mingw32 \
+              -DBUILD_TESTS=OFF -DBUILD_TESTING=OFF \
+              ..
+            make -j"${JOBS}" wow64fex
+            test -f Bin/libwow64fex.dll
+            if [ "${BUILD_TYPE}" = "Release" ] && command -v llvm-strip >/dev/null 2>&1; then
+              llvm-strip --strip-all Bin/libwow64fex.dll || true
+            fi
+            ls -lh Bin/libwow64fex.dll
+            cd /opt/fex-src
+          fi
+
+          # ---- 汇总产物 ----
+          mkdir -p /tmp/fex-out
+          rm -f /tmp/fex-out/*.dll
+          [ -f /opt/fex-src/build_ec/Bin/libarm64ecfex.dll ] && cp /opt/fex-src/build_ec/Bin/libarm64ecfex.dll /tmp/fex-out/
+          [ -f /opt/fex-src/build_pe/Bin/libwow64fex.dll ] && cp /opt/fex-src/build_pe/Bin/libwow64fex.dll /tmp/fex-out/
+          [ -n "$(ls -A /tmp/fex-out/*.dll 2>/dev/null)" ] || { echo "FATAL: 没有 FEX 产物"; exit 1; }
+          echo "${FEX_COMMIT}" > /tmp/fex-out/FEX_COMMIT
+          echo "${FEX_DESC}"   > /tmp/fex-out/FEX_DESC
+          ls -lh /tmp/fex-out
+
+          # ---- 归档 ccache ----
+          if [ "${USE_CACHE}" = "1" ]; then
+            cd ~/.cache && rm -f /tmp/fex-ccache.tar.xz && tar -I 'xz -T0' -cf /tmp/fex-ccache.tar.xz ccache || true
+          fi
+          echo "✅ FEX build done"
+          EOS
+
+          # 注入 workflow 输入
+          sed -i "s|__FEX_REPO__|${{ inputs.fex_repo || 'AndreRH/FEX' }}|g" /tmp/build-fex.sh
+          # fex_ref 为空时按仓库给默认
+          FEXREF="${{ inputs.fex_ref }}"
+          if [ -z "$FEXREF" ]; then
+            case "${{ inputs.fex_repo || 'AndreRH/FEX' }}" in
+              *AndreRH/FEX*) FEXREF="arm64ec" ;;
+              *)             FEXREF="main" ;;
+            esac
+          fi
+          sed -i "s|__FEX_REF__|${FEXREF}|g" /tmp/build-fex.sh
+          sed -i "s|__JOBS__|${{ inputs.jobs || '8' }}|g" /tmp/build-fex.sh
+          sed -i "s|__BUILD_TYPE__|${{ inputs.build_type || 'Release' }}|g" /tmp/build-fex.sh
+          sed -i "s|__BUILD_EC__|${{ github.event_name != 'workflow_dispatch' || inputs.build_arm64ecfex }}|g" /tmp/build-fex.sh
+          sed -i "s|__BUILD_WOW64__|${{ github.event_name != 'workflow_dispatch' || inputs.build_wow64fex }}|g" /tmp/build-fex.sh
+          sed -i "s|__VERSION_LABEL__|${{ inputs.version_label }}|g" /tmp/build-fex.sh
+
+          sudo cp /tmp/build-fex.sh /tmp/archlinux/bin/build-fex.sh
+          sudo chmod +x /tmp/archlinux/bin/build-fex.sh
+          echo "--- 注入后的关键行 ---"
+          grep -nE 'FEX_REPO=|FEX_REF=|BUILD_TYPE=|BUILD_EC|BUILD_WOW64|VERSION_LABEL' /tmp/archlinux/bin/build-fex.sh | head
+
+      # ============================================================
+      # 4. chroot 内编译
+      # ============================================================
+      - name: Compile FEX in BCC chroot
+        run: |
+          set -eux
+          cd /tmp
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux mount
+          sudo chroot archlinux /bin/build-fex.sh
+          bash "$GITHUB_WORKSPACE/mount.sh" archlinux unmount
+          test -d /tmp/archlinux/tmp/fex-out || { echo "❌ 未找到 /tmp/fex-out"; exit 1; }
+          ls -lh /tmp/archlinux/tmp/fex-out
+          sudo chown -R "$USER":"$USER" /tmp/archlinux/tmp/fex-out
+
+      # ============================================================
+      # 5. 取 box64 wowbox64.dll（可选）
+      # ============================================================
+      - name: Fetch box64 WOW64 DLL (wowbox64.dll)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.include_wowbox64 }}
+        env:
+          BOX64_REPO: ${{ inputs.box64_repo || 'as14725836/termux-glibc-box64' }}
+          BOX64_TAG: ${{ inputs.box64_release_tag || '' }}
+        run: |
+          set -u
+          trap 'echo "⚠ box64 取用失败，跳过 wowbox64.dll（不阻断）"; exit 0' ERR
+          OUT=/tmp/box64-wow64; rm -rf "${OUT}"; mkdir -p "${OUT}"
+          API="https://api.github.com/repos/${BOX64_REPO}"
+          TAG="${BOX64_TAG}"
+          if [ -z "${TAG}" ]; then
+            curl -sSL --retry 5 --max-time 60 -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "${API}/releases?per_page=30" -o /tmp/box64-rel.json
+            TAG=$(python3 -c 'import json;d=json.load(open("/tmp/box64-rel.json"));t=sorted(str(x.get("tag_name","")) for x in d if str(x.get("tag_name","")).startswith("box64-dev-"));print(t[-1] if t else "")')
+          fi
+          if [ -z "${TAG}" ]; then echo "⚠ 未找到 box64-dev-* Release，跳过"; exit 0; fi
+          curl -sSL --retry 5 --max-time 60 -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "${API}/releases/tags/${TAG}" -o /tmp/box64-tagx.json
+          ASSET=$(python3 -c 'import json;d=json.load(open("/tmp/box64-tagx.json"));a=[str(x["name"]) for x in d.get("assets",[]) if str(x["name"]).endswith(".tar.gz")];print(a[0] if a else "")')
+          test -n "${ASSET}" || { echo "FATAL: ${TAG} 无 .tar.gz"; exit 1; }
+          curl -sSL --max-time 600 -o /tmp/box64dev.tar.gz \
+            "https://github.com/${BOX64_REPO}/releases/download/${TAG}/${ASSET}"
+          tar xzf /tmp/box64dev.tar.gz -C /tmp
+          SRC=$(find /tmp -name wowbox64.dll | head -1)
+          test -n "${SRC}" || { echo "FATAL: 未取到 wowbox64.dll"; exit 1; }
+          install -m0644 "${SRC}" "${OUT}/wowbox64.dll"
+          echo "${TAG}" > "${OUT}/BOX64_TAG"
+          ls -lh "${OUT}" /tmp/archlinux/tmp/fex-out
+
+      # ============================================================
+      # 6. 打包
+      # ============================================================
+      - name: Package FEX
+        run: |
+          set -eux
+          PKG=/tmp/fex-pkg; rm -rf "${PKG}"; mkdir -p "${PKG}/fex"
+          FEXOUT=/tmp/archlinux/tmp/fex-out
+          for d in libarm64ecfex.dll libwow64fex.dll; do
+            [ -f "${FEXOUT}/${d}" ] && install -m0644 "${FEXOUT}/${d}" "${PKG}/fex/${d}"
+          done
+          [ -f /tmp/box64-wow64/wowbox64.dll ] && install -m0644 /tmp/box64-wow64/wowbox64.dll "${PKG}/fex/wowbox64.dll"
+          [ -f /tmp/box64-wow64/BOX64_TAG ] && cp -a /tmp/box64-wow64/BOX64_TAG "${PKG}/fex/BOX64_TAG"
+          test -n "$(ls -A "${PKG}/fex"/*.dll 2>/dev/null)" || { echo "FATAL: 无 DLL 产物"; exit 1; }
+
+          FEX_COMMIT="$(cat "${FEXOUT}/FEX_COMMIT" 2>/dev/null || echo unknown)"
+          FEX_DESC="$(cat "${FEXOUT}/FEX_DESC" 2>/dev/null || echo unknown)"
+          FEX_DESC_SAFE="$(printf '%s' "${FEX_DESC}" | tr ' ' '-' | tr '/' '-' | tr -cd 'A-Za-z0-9._-')"
+          [ -n "${FEX_DESC_SAFE}" ] || FEX_DESC_SAFE="unknown"
+          case "${FEX_DESC_SAFE}" in FEX-*|fex-*) PREFIX="" ;; *) PREFIX="fex-" ;; esac
+          SUF="${{ inputs.pkg_suffix }}"
+          PKG_NAME="${PREFIX}${FEX_DESC_SAFE}-arm64ec-wow64-bcc${SUF:+-${SUF}}"
+          echo "PKG_NAME=${PKG_NAME}" >> "$GITHUB_ENV"
+
+          cat > "${PKG}/fex/fex-env.sh" << 'EOS'
+          #!/bin/bash
+          # FEX(Termux glibc) 路径配置：source "<wine根>/share/fex-emu/fex-env.sh"
+          _fex_share="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+          _fex_root="$(cd "${_fex_share}/../.." && pwd)"
+          export FEX_THUNKHOSTLIBS="${_fex_root}/lib/wine/aarch64-windows/fex-emu/HostThunks"
+          export FEX_THUNKGUESTLIBS="${_fex_share}/GuestThunks"
+          export FEX_ROOTFS="${_fex_share}/RootFS"
+          export FEX_THUNKCONFIG="${_fex_share}"
+          export FEX_PORTABLE=1
+          export HODLL64=libarm64ecfex.dll
+          export HODLL=libwow64fex.dll
+          echo "[fex-env] wine 根目录 = ${_fex_root}"
+          EOS
+          chmod 0755 "${PKG}/fex/fex-env.sh"
+
+          cat > "${PKG}/fex/BUILD_INFO.txt" << EOS
+          FEX for Termux glibc (built in wine-termux BCC chroot)
+          ======================================================
+          fex_commit  : ${FEX_COMMIT}
+          fex_describe: ${FEX_DESC}
+          build_type  : ${{ inputs.build_type || 'Release' }}
+          tune        : TUNE_ARCH=generic TUNE_CPU=none
+          toolchain   : llvm-mingw (${{ inputs.llvm_mingw_distro || 'bylaws' }})
+          chroot      : wine-bcc (Arch Linux, same as wine_tkg_wow64.yml)
+          build date  : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          runner      : $(uname -m)
+
+          DLLs:
+          $( (cd "${PKG}/fex" && ls -lh *.dll) || true )
+          box64: $(cat "${PKG}/fex/BOX64_TAG" 2>/dev/null || echo "(未包含)")
+          EOS
+
+          cd "${PKG}"
+          PKG_DLLS="$(ls fex/*.dll 2>/dev/null || true)"
+          tar cJf "${PKG_NAME}.tar.xz" ${PKG_DLLS}
+          sha256sum "${PKG_NAME}.tar.xz" > checksums.txt
+          ls -lh
+          echo "PKG_DIR=${PKG}" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 7. 校验（PE Machine / BTCpu 导出 / 归档白名单）
+      # ============================================================
+      - name: Verify artifacts
+        run: |
+          set -u
+          cd "${PKG_DIR}"
+          tar tJf "${PKG_NAME}.tar.xz"
+          rm -rf /tmp/fex-verify; mkdir -p /tmp/fex-verify
+          tar xJf "${PKG_NAME}.tar.xz" -C /tmp/fex-verify
+          file /tmp/fex-verify/fex/*.dll
+          EXTRA="$(find /tmp/fex-verify -type f ! -name '*.dll' || true)"
+          if [ -n "${EXTRA}" ]; then echo "::error::包内有非 DLL：${EXTRA}"; exit 1; fi
+          echo "OK：包内仅 DLL"
+          OBJDUMP="$(command -v llvm-objdump || echo /opt/llvm-mingw/bin/llvm-objdump)"
+          FAIL=0
+          for D in /tmp/fex-verify/fex/*.dll; do
+            N="$(basename "${D}")"
+            MACH="$(python3 -c "import struct;d=open('${D}','rb').read();o=struct.unpack_from('<I',d,0x3c)[0];m=struct.unpack_from('<H',d,o+4)[0];print({0x14c:'i386',0x8664:'x86-64',0xaa64:'Aarch64',0xa641:'ARM64EC'}.get(m,'0x%04x'%m))" 2>/dev/null || true)"
+            echo "  ${N}: Machine=${MACH:-未知}"
+          done
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: |
+            ${{ env.PKG_DIR }}/*.tar.xz
+            ${{ env.PKG_DIR }}/checksums.txt
+          retention-days: 30
+
+      # ============================================================
+      # 8. 发布 Release
+      # ============================================================
+      - name: Publish Release
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.PKG_NAME }}
+          name: FEX ${{ env.PKG_NAME }} (BCC chroot, arm64ec + wow64)
+          draft: false
+          prerelease: false
+          overwrite_files: true
+          files: |
+            ${{ env.PKG_DIR }}/${{ env.PKG_NAME }}.tar.xz
+            ${{ env.PKG_DIR }}/checksums.txt
