@@ -776,14 +776,29 @@ jobs:
           done
 
           # 5.8b C23 `bool` 关键字兼容（Pipetto/wine proton-9.0-arm64ec 等旧分支）
-          #      旧代码: `struct sysparam_bool_entry bool;` 与 `{ .bool = {...} }`
-          #      C23 下 bool 是关键字 -> "expected identifier before 'bool'"
+          #      sysparams.c 的 union sysparam_all_entry 有个成员就叫 `bool`：
+          #        union sysparam_all_entry { ... struct sysparam_bool_entry bool; ... };
+          #        entry->bool.val = ...
+          #        { .bool = { ... } }
+          #      C23 起 bool 是关键字 -> "expected identifier before 'bool'"。
+          #      上游已把它改名为 boolean，这里做同样的改名（三处都要动，
+          #      只改声明不改引用会留下一半旧名，编译照样过不去）。
           if [ -f dlls/win32u/sysparams.c ]; then
-            if grep -qE 'struct[[:space:]]+sysparam_bool_entry[[:space:]]+bool[[:space:]]*;' dlls/win32u/sysparams.c; then
-              echo "--- C23 bool 关键字兼容: sysparams.c (bool -> boolean) ---"
+            if grep -qE '(struct[[:space:]]+sysparam_bool_entry[[:space:]]+bool[[:space:]]*;|->bool\.|\.bool[[:space:]]*=)' dlls/win32u/sysparams.c; then
+              echo "--- C23 bool 关键字兼容: sysparams.c (成员 bool -> boolean) ---"
+              # 1) union 成员声明
               sed -i -E 's/(struct[[:space:]]+sysparam_bool_entry[[:space:]]+)bool([[:space:]]*;)/\1boolean\2/g' dlls/win32u/sysparams.c
-              sed -i -E 's/\.bool([[:space:]]*=)/.boolean\1/g' dlls/win32u/sysparams.c
-              grep -nE 'sysparam_bool_entry[[:space:]]+boolean|\.boolean[[:space:]]*=' dlls/win32u/sysparams.c | head -8 || true
+              # 2) 成员访问 entry->bool.val
+              sed -i -E 's/([A-Za-z_][A-Za-z_0-9]*[[:space:]]*->)bool([[:space:]]*\.)/\1boolean\2/g' dlls/win32u/sysparams.c
+              # 3) 指定初始化 { .bool = ... }
+              sed -i -E 's/(\.)bool([[:space:]]*=)/\1boolean\2/g' dlls/win32u/sysparams.c
+              LEFT=$(grep -cE '(struct[[:space:]]+sysparam_bool_entry[[:space:]]+)bool[[:space:]]*;|->bool\.|\.bool[[:space:]]*=' dlls/win32u/sysparams.c || true)
+              echo "     改完残留的旧名: ${LEFT}（应为 0）"
+              grep -nE 'sysparam_bool_entry[[:space:]]+boolean|->boolean\.|\.boolean[[:space:]]*=' dlls/win32u/sysparams.c | head -12 || true
+              if [ "${LEFT}" != "0" ]; then
+                echo "!! sysparams.c 里还有 ${LEFT} 处 bool 成员名没改名，编译会失败"
+                exit 1
+              fi
             fi
           fi
           # 5.8c 其它把 bool 当成员名的文件（仅报告，不自动改以免误伤）
