@@ -244,11 +244,15 @@ jobs:
           Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch
           MIRREOF
 
+          # 先做一次 full upgrade：只做 -Sy/-Syy 会「部分升级」，导致 ccache
+          # 升到新版却缺新依赖（libhiredis.so.1.4.0），编译时 Error 127。
+          pacman -Syu --noconfirm --disable-download-timeout || true
+
           pacman_install() {
             for attempt in 1 2 3 4; do
               echo "--- pacman 尝试 $attempt ---"
-              if pacman -Syy --noconfirm --disable-download-timeout \
-                   base-devel git curl xz zstd unzip file python perl pkgconf ccache \
+              if pacman -S --noconfirm --needed --disable-download-timeout \
+                   base-devel git curl xz zstd unzip file python perl pkgconf ccache hiredis \
                    autoconf automake libtool flex bison gettext nasm cmake ninja meson \
                    aarch64-linux-gnu-gcc aarch64-linux-gnu-binutils aarch64-linux-gnu-glibc \
                    mingw-w64-gcc mingw-w64-crt mingw-w64-headers mingw-w64-binutils; then
@@ -260,9 +264,23 @@ jobs:
           }
           if ! pacman_install; then
             echo "⚠️ 完整依赖安装失败，退化为最小集合再试"
-            pacman -Syy --noconfirm --disable-download-timeout base-devel git curl xz zstd unzip \
+            pacman -S --noconfirm --needed --disable-download-timeout base-devel git curl xz zstd unzip \
               aarch64-linux-gnu-gcc aarch64-linux-gnu-glibc mingw-w64-gcc mingw-w64-crt mingw-w64-headers \
               || echo "⚠️ 最小集合也失败，继续（可能在后续步骤暴露）"
+          fi
+          # 防 ABI 错配：确保 ccache 的运行时依赖在
+          pacman -S --noconfirm --needed hiredis ccache 2>/dev/null || true
+          # ccache 健全性检查：坏掉就装透明 wrapper 直通编译器
+          if ccache --version >/dev/null 2>&1; then
+            echo "✅ ccache: $(ccache --version | head -1)"
+          else
+            echo "⚠️ ccache 不可用 -> 装直通 wrapper 并禁用缓存"
+            export CCACHE_DISABLE=1
+            for d in /usr/local/bin /usr/bin /usr/sbin; do
+              mkdir -p "$d" 2>/dev/null || true
+              printf '%s\n' '#!/bin/sh' 'exec "$@"' > "$d/ccache" 2>/dev/null || true
+              chmod +x "$d/ccache" 2>/dev/null || true
+            done
           fi
 
           echo "--- 工具链验证 ---"
