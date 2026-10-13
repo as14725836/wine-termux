@@ -491,6 +491,21 @@ jobs:
                 cp -a "$ARM64_SYSROOT/usr/share/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
               fi
               cp -a "$ARCH_SYSROOT/lib/pkgconfig/." "$ARCH_SYSROOT/lib64/pkgconfig/" 2>/dev/null || true
+              # Debian 的 .pc 里 includedir=/usr/include、libdir=/usr/lib/aarch64-linux-gnu，
+              # 但真实合并位置是 $ARCH_SYSROOT/{include,lib}。逐条改写以匹配。
+              for pc in "$ARCH_SYSROOT"/lib/pkgconfig/*.pc "$ARCH_SYSROOT"/lib64/pkgconfig/*.pc; do
+                [ -f "$pc" ] || continue
+                sed -i \
+                  -e "s|^prefix=/usr$|prefix=$ARCH_SYSROOT|" \
+                  -e "s|^exec_prefix=/usr$|exec_prefix=$ARCH_SYSROOT|" \
+                  -e "s|^includedir=/usr/include$|includedir=$ARCH_SYSROOT/include|" \
+                  -e "s|^includedir=\${prefix}/include$|includedir=$ARCH_SYSROOT/include|" \
+                  -e "s|^libdir=/usr/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
+                  -e "s|^libdir=\${exec_prefix}/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
+                  "$pc" 2>/dev/null || true
+              done
+              echo "--- 改写后的 libpulse.pc ---"
+              cat "$ARCH_SYSROOT/lib/pkgconfig/libpulse.pc" 2>/dev/null | head -12 || true
               echo "✅ 已合并到 $ARCH_SYSROOT"
               echo "--- sysroot 自检 ---"
               ls -la "$ARCH_SYSROOT"/lib/libX11.so* "$ARCH_SYSROOT"/lib/libfreetype.so* 2>&1 | head -12 || true
@@ -736,7 +751,7 @@ jobs:
           if [ -f "$ARM64_LIBDIR/libX11.so" ]; then
             export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig"
             export PKG_CONFIG_LIBDIR="${ARM64_LIBDIR}/pkgconfig"
-            export PKG_CONFIG_SYSROOT_DIR="/usr/aarch64-linux-gnu"
+            unset PKG_CONFIG_SYSROOT_DIR
             XFLAGS="--with-x"
             VKFLAGS="--with-vulkan"
             echo "✅ 使用 merged arm64 sysroot: $ARM64_LIBDIR"
