@@ -1668,10 +1668,11 @@ def get_wine_target_dir():
 
 
 def env_summary():
-    name, pfx, _ = read_wine_config()
+    """顶栏那行摘要 —— 只报 wine 名字，不显示一长串路径。"""
+    name, _pfx, _ = read_wine_config()
     if not name:
-        return "未找到 wine（看 %s）" % CONF_FILE
-    return "当前 wine: %s　·　prefix: %s" % (name, pfx or "?")
+        return "未找到 wine"
+    return "wine: %s" % name
 
 
 # ── store / compat 布局 ─────────────────────────────────
@@ -1870,6 +1871,203 @@ def write_windows_version(val):
         return False
 
 
+def component_dlls(comp):
+    """这个组件会装哪些 dll —— 优先从 override_dll 里拿（最准），
+    没有就退回 copy_dll 的文件名。返回去重后的短名列表（去掉 .dll）。"""
+    if not isinstance(comp, dict):
+        return []
+    names, seen = [], set()
+
+    def add(raw):
+        if not isinstance(raw, str):
+            return
+        s = raw.strip().strip('"')
+        if not s or s in ("*", "*.dll", "*.DLL"):
+            return
+        # 只去掉 .dll（最常见的那个）；.dls/.drv 之类保留扩展名更清楚
+        if s.lower().endswith(".dll") and len(s) > 4:
+            s = s[:-4]
+        if not s or s.lower() in seen:
+            return
+        seen.add(s.lower())
+        names.append(s)
+
+    for st in comp.get("steps") or []:
+        if not isinstance(st, dict):
+            continue
+        if st.get("action") == "override_dll":
+            b = st.get("bundle")
+            if isinstance(b, list):
+                for e in b:
+                    if isinstance(e, dict):
+                        add(e.get("value") or e.get("name") or e.get("dll"))
+                    else:
+                        add(e)
+            else:
+                add(st.get("dll") or st.get("value") or st.get("name"))
+    if not names:
+        for st in comp.get("steps") or []:
+            if isinstance(st, dict) and st.get("action") in ("copy_dll", "copy_file"):
+                add(st.get("file_name"))
+    return names
+
+
+def component_size_bytes(comp):
+    """这个组件真正要下载多大 —— 把各 archive_extract 的 file_size 加起来。"""
+    if not isinstance(comp, dict):
+        return 0
+    total = 0
+    for st in comp.get("steps") or []:
+        if not isinstance(st, dict):
+            continue
+        if st.get("action") in ("archive_extract", "download_archive"):
+            total += _to_int(st.get("file_size"))
+        elif st.get("action") == "download_archive" and st.get("files"):
+            pass
+    return total
+
+
+def _to_int(v):
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return 0
+
+
+CARD_W = 176          # 目标卡片宽度（pt）
+CARD_MIN = 132        # 最窄
+CARD_MAX = 260        # 最宽
+CARD_H = 88           # 卡片高度：两行
+CARD_H_MINI = 88      # 统一高度，同行才齐
+
+
+class ComponentCard(QPushButton):
+    """组件卡片：第一行组件名（+ ✓），第二行撞上dll 摘要。
+
+    继承 QPushButton 是为了白拿 clicked 信号、setEnabled、eventFilter 那套。
+    自己画，免得被样式表撑成各种宽度。
+    """
+
+    def __init__(self, name, dlls=None, installed=False, desc="", size=0, parent=None):
+        super().__init__(parent)
+        self.comp_name = name
+        self.dlls = list(dlls or [])
+        self.installed = bool(installed)
+        self.desc = desc or ""
+        self.size_bytes = size
+        self._w = CARD_W
+        self._h = CARD_H
+        self.setObjectName("compCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setFlat(True)
+        self.setCheckable(False)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(self._w, self._h)
+
+    def set_width(self, w):
+        """由布局按列数算出来的宽度。"""
+        w = int(w)
+        if w != self._w:
+            self._w = w
+            self.setFixedSize(self._w, self._h)
+            self.updateGeometry()
+
+    def set_installed(self, on):
+        self.installed = bool(on)
+        self.update()
+
+    def sizeHint(self):
+        return QSize(self._w, self._h)
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    # 文字分两段：主名 + dll 摘要
+    def _subtitle(self):
+        if not self.dlls:
+            return ""
+        head = " · ".join(self.dlls[:3])
+        if len(self.dlls) > 3:
+            return "%s  …+%d" % (head, len(self.dlls) - 3)
+        return head
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        hover = self.underMouse() and self.isEnabled()
+        down = self.isDown() and self.isEnabled()
+
+        if down:
+            bg = QColor(136, 221, 255, 64)
+            bd = QColor(136, 221, 255, 150)
+        elif hover:
+            bg = QColor(136, 221, 255, 46)
+            bd = QColor(136, 221, 255, 102)
+        elif self.installed:
+            bg = QColor(120, 220, 170, 30)
+            bd = QColor(120, 220, 170, 96)
+        else:
+            bg = QColor(255, 255, 255, 20)
+            bd = QColor(180, 220, 255, 64)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(bg)
+        p.drawRoundedRect(r, 14, 14)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(bd)
+        p.drawRoundedRect(r, 14, 14)
+
+        if not self.isEnabled():
+            p.setOpacity(0.45)
+
+        pad = 14
+        # 第一行：名字
+        f = QFont(self.font())
+        f.setPointSizeF(11.5)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(0xe4, 0xed, 0xff) if self.isEnabled() else QColor(0xa0, 0xa8, 0xb8))
+        top = QRectF(r.left() + pad, r.top() + 9, r.width() - 2 * pad - 22, 24)
+        p.drawText(top, Qt.AlignLeft | Qt.AlignVCenter,
+                   self._elide(p, self.comp_name, top.width()))
+
+        # 右上角 ✓
+        if self.installed:
+            f2 = QFont(self.font())
+            f2.setPointSizeF(13)
+            f2.setBold(True)
+            p.setFont(f2)
+            p.setPen(QColor(0x7a, 0xdc, 0xa8))
+            p.drawText(QRectF(r.right() - pad - 22, r.top() + 7, 20, 24),
+                       Qt.AlignRight | Qt.AlignVCenter, "\u2713")
+
+        sub = self._subtitle()
+        if sub:
+            f3 = QFont(self.font())
+            f3.setPointSizeF(9.5)
+            p.setFont(f3)
+            p.setPen(QColor(0x9a, 0xc4, 0xe8) if self.isEnabled() else QColor(0x70, 0x78, 0x88))
+            rc = QRectF(r.left() + pad, r.top() + 34, r.width() - 2 * pad, 20)
+            p.drawText(rc, Qt.AlignLeft | Qt.AlignVCenter, self._elide(p, sub, rc.width()))
+
+        if self.size_bytes:
+            f4 = QFont(self.font())
+            f4.setPointSizeF(9)
+            p.setFont(f4)
+            p.setPen(QColor(0x7e, 0x9c, 0xc0) if self.isEnabled() else QColor(0x60, 0x68, 0x78))
+            sz = _human_size(self.size_bytes)
+            rc2 = QRectF(r.left() + pad, r.bottom() - 24, r.width() - 2 * pad, 18)
+            p.drawText(rc2, Qt.AlignLeft | Qt.AlignVCenter, sz)
+
+    @staticmethod
+    def _elide(painter, text, width):
+        fm = painter.fontMetrics()
+        return fm.elidedText(text, Qt.ElideRight, int(width))
+
+
 class FlowLayout(QLayout):
     """自动换行的流式布局"""
     def __init__(self, parent=None, margin=0, hspacing=6, vspacing=6):
@@ -1946,7 +2144,7 @@ class FlowLayout(QLayout):
             if w <= 0:
                 continue
 
-            if x + w > right and line_height > 0:
+            if x + w > right + 2 and line_height > 0:
                 x = rect.x() + m.left()
                 y += line_height + self._vspace
                 line_height = 0
@@ -1966,7 +2164,7 @@ QDialog {
     border-radius: 22px;
 }
 QLabel#statusLabel {
-    font-size: 14pt;
+    font-size: 11pt;
     color: #88ddff;
     padding: 2px 0;
 }
@@ -2234,7 +2432,9 @@ class WinComponentsDialog(QDialog):
         self.status_label = QLabel()
         self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setToolTip(env_summary())
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(10)
+        self.status_label.setToolTip(self._env_tooltip())
         layout.addWidget(self.status_label)
 
         # 流式卡片区域
@@ -2245,7 +2445,7 @@ class WinComponentsDialog(QDialog):
 
         self.flow_widget = QWidget()
         self.flow_widget.setStyleSheet("background: transparent;")
-        self.flow = FlowLayout(self.flow_widget, margin=0, hspacing=7, vspacing=7)
+        self.flow = FlowLayout(self.flow_widget, margin=0, hspacing=10, vspacing=10)
         self.scroll.setWidget(self.flow_widget)
         layout.addWidget(self.scroll, 1)
 
@@ -2363,34 +2563,50 @@ class WinComponentsDialog(QDialog):
         QTimer.singleShot(250, check)
 
     def _fit_width(self):
-        mbw = getattr(self, "_max_btn_w", 0)
-        if mbw <= 0:
-            return
-        need = mbw + 96
-        scr = QApplication.primaryScreen()
-        avail = scr.availableGeometry().width() if scr is not None else 1080
-        cap = int(avail * 0.96)
+        """只定一个合理的最小宽度，不主动撑窗口 —— 列数由窗口宽度决定。"""
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        if need > cap:
-            need = cap
-        if need < 420:
-            need = 420
+        need = CARD_W + 2 * 24
         if self.minimumWidth() < need:
             self.setMinimumWidth(need)
-        if self.width() < need:
-            self.resize(need, self.height())
 
     def _update_scroll_size(self):
-        vp = self.scroll.viewport()
-        if vp is None:
+        """按可用宽度算列数，再反推卡片宽度 —— 每行填满、左起、间距均匀。
+
+        宽度从 scroll 控件本身推（不读 viewport —— 它的宽度会被我们设的
+        flow_widget 反过来影响，形成循环）。
+        """
+        avail = self.scroll.width() - 2 * self.scroll.frameWidth() - 22
+        if avail < 80:
+            return                      # 还没布局好，等下一次
+        gap = self.flow._hspace
+
+        # 目标卡片宽度 ~ CARD_W，据此定列数；再按列数把宽度撑满
+        cols = max(1, int((avail + gap) // (CARD_W + gap)))
+        while cols > 1 and cols * CARD_MIN + (cols - 1) * gap > avail:
+            cols -= 1
+        card_w = (avail - (cols - 1) * gap) // cols
+        card_w = max(CARD_MIN, min(card_w, CARD_MAX))
+
+        # 有变化才动，避免反复 setFixedSize 触发递归
+        if getattr(self, "_cols", None) == (cols, card_w):
             return
-        w = vp.width()
-        if w < 50:
-            w = 400
+        self._cols = (cols, card_w)
+
+        for i in range(self.flow.count()):
+            w = self.flow.itemAt(i).widget()
+            if w is not None and hasattr(w, "set_width"):
+                w.set_width(card_w)
+
+        w = cols * card_w + (cols - 1) * gap
         h = self.flow.heightForWidth(w)
         if h < 100:
             h = 100
         self.flow_widget.setFixedSize(w, h)
+        self._center_flow(avail, w)
+
+    def _center_flow(self, avail, w):
+        """居中交给 QScrollArea 的 alignment 做，不碰 viewportMargins。"""
+        self.scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
     def _filter(self, text):
         while self.flow.count():
@@ -2416,23 +2632,27 @@ class WinComponentsDialog(QDialog):
                 continue
             shown += 1
             size = component_size(c)
-            mark = "  ✓" if name in self._installed else ""
-            btn = QPushButton(name + mark)
-            btn.setObjectName("verBtn")
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            tip = "%s\n%s\n%s" % (name, desc or "(无描述)",
-                                   ("大小 " + human_size(size)) if size else "")
-            if name in self._installed:
-                tip += "\n状态：已安装（再点一下重新装）"
-            btn.setToolTip(tip)
-            btn.clicked.connect(lambda checked, n=name: self._click_component(n))
-            btn.installEventFilter(self)
-            self.flow.addWidget(btn)
-            btn.ensurePolished()
-            maxw = max(maxw, btn.sizeHint().width())
+            dlls = component_dlls(c)
+            inst = name in self._installed
+            card = ComponentCard(name, dlls=dlls, installed=inst,
+                                 desc=desc, size=size, parent=self.flow_widget)
+            tip = name
+            if desc:
+                tip += "\n" + desc
+            if size:
+                tip += "\n大小 " + human_size(size)
+            if dlls:
+                tip += "\n装这些（%d）：%s" % (len(dlls), ", ".join(dlls))
+            tip += "\n状态：已安装（再点一下重装）" if inst else "\n点一下安装"
+            card.setToolTip(tip)
+            card.clicked.connect(lambda checked, n=name: self._click_component(n))
+            card.installEventFilter(self)
+            self.flow.addWidget(card)
+            maxw = max(maxw, card.sizeHint().width())
             count += 1
 
         self._max_btn_w = maxw
+        self._cols = None                 # 卡片重建了 -> 列数要重算
         if count:
             extra = "　·　还有 %d 个需要 Windows 安装器" % skipped if skipped else ""
             src_txt = {"cache": "本地缓存", "net": "在线"}.get(self.catalog_src, self.catalog_src)
@@ -2450,7 +2670,7 @@ class WinComponentsDialog(QDialog):
         if text:
             self.status_label.setText(text)
         for b in self.findChildren(QPushButton):
-            if b.objectName() in ("verBtn", "setBtn"):
+            if b.objectName() in ("compCard", "setBtn", "verBtn"):
                 b.setEnabled(not busy)
 
     def _click_component(self, name):
@@ -2475,9 +2695,38 @@ class WinComponentsDialog(QDialog):
                 return
             ok, msg = box["result"]
             self._installed = set(installed_ids(self.appid, self.prefix))
-            self._filter(self.search_edit.text())
+            if ok:
+                # 只刷新这一张卡片的 ✓，不重建整个列表（保住滚动位置、不闪）
+                card = self._card_by_name(name)
+                if card is not None:
+                    card.set_installed(name in self._installed)
+            else:
+                self._filter(self.search_edit.text())
             self.status_label.setText(msg if ok else "失败：" + msg)
         QTimer.singleShot(200, check)
+
+    def _env_tooltip(self):
+        """悬停状态行才显示完整路径 —— 平时不占地方。"""
+        name, pfx, root = read_wine_config()
+        lines = ["wine    : %s" % (name or "?")]
+        lines.append("prefix  : %s" % (pfx or "?"))
+        if root:
+            lines.append("wine 根 : %s" % root)
+        tgt = get_wine_target_dir()
+        if tgt:
+            lines.append("安装到  : %s" % tgt)
+        ver = read_current_windows_version()
+        if ver:
+            lines.append("版本    : %s" % ver)
+        return "\n".join(lines)
+
+    def _card_by_name(self, name):
+        """按组件名找到当前显示的那张卡片。"""
+        for i in range(self.flow.count()):
+            w = self.flow.itemAt(i).widget()
+            if w is not None and getattr(w, "comp_name", None) == name:
+                return w
+        return None
 
     def _delete_multi(self):
         """卸载：勾选已装组件，从 prefix 里撤掉（会还原被覆盖的原文件）。"""
@@ -2520,7 +2769,9 @@ class WinComponentsDialog(QDialog):
                 self.status_label.setText("卸载失败：%s" % box["error"])
                 return
             self._installed = set(installed_ids(self.appid, self.prefix))
+            sb = self.scroll.verticalScrollBar().value()
             self._filter(self.search_edit.text())
+            self.scroll.verticalScrollBar().setValue(sb)   # 卸载后停在原地
             self.status_label.setText("已卸载 %d 个组件" % len(box["result"]))
         QTimer.singleShot(200, check)
 
@@ -2601,6 +2852,7 @@ class WinComponentsDialog(QDialog):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 22, 22)
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        self._cols = None                 # 窗口尺寸变了 -> 列数要重算
         QTimer.singleShot(0, self._update_scroll_size)
 
 
@@ -2639,8 +2891,12 @@ def _selftest():
     if ok:
         print("  例子：")
         for c in ok[:10]:
-            print("    %-22s %10s  %s" % (c.get("name"), human_size(component_size(c)),
-                                          (c.get("description") or "")[:38]))
+            sz = component_size(c)
+            dlls = component_dlls(c)
+            print("    %-22s %3d dll  %9s  %s" % (
+                c.get("name"), len(dlls),
+                human_size(sz) if sz else "-",
+                (c.get("description") or "")[:34]))
     return 0
 
 
