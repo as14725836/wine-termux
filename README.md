@@ -29,6 +29,50 @@ wincomponents               # 开界面
 
 
 
+
+## 拖动 / 缩放窗口
+
+窗口是无边框的（没有系统标题栏），所以**抓哪儿都能拖**：
+
+- 卡片上按住拖动 → 拖窗口
+- 状态行、进度条、按钮之间的空隙 → 拖窗口
+- 窗口边缘 16px padding → 拖窗口
+- **右下角 10px** → 拉伸缩放
+
+不冲突的操作照常工作：**滚动条**能拖、**搜索框**能输入、
+**卡片轻轻点一下**还是安装（位移小于 6px 算点击，超过才算拖动）。
+
+### 为什么要自己处理鼠标
+
+`QPushButton`（卡片就是）一旦按下就 **grab mouse**，之后的 `MouseMove`
+全被它吃掉，窗口再也收不到 —— 结果就是"卡片上拖不动窗口"。
+
+做法是按下时先 `return True` 拦住 grab，然后在 `MouseButtonRelease` 里
+自己补一次 `click()`，否则卡片就点不动了：
+
+```python
+if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+    ...
+    self._press_obj = obj if isinstance(obj, QPushButton) else None
+    if self._press_obj is not None:
+        self._press_obj.setDown(True)
+        return True          # 拦住 grab，MouseMove 才会发给我们
+
+if event.type() == QEvent.MouseButtonRelease:
+    if po is not None and not was_drag and po.isEnabled():
+        if po.rect().contains(po.mapFromGlobal(event.globalPos())):
+            po.click()       # 没拖动 -> 补一次点击
+```
+
+### 两个坑
+
+1. **`frameGeometry` 判断缩放边要限定在窗口内** —— 滚动区里位置偏低的卡片，
+   全局坐标的 `y` 可能超过窗口底边，会被误判成"抓右下角"，于是变成缩放而不是拖动。
+
+2. **窗口自身也要装 eventFilter** —— `_install_drag_filter` 只遍历子控件，
+   padding 空白处的按下事件得靠 `self.installEventFilter(self)` 才收得到。
+
+
 ## 没梯子也能下（多镜像自动回退）
 
 `github.com` 的 releases 在国内直连基本是**龟速或直接超时**，所以下载不再只试直连，
