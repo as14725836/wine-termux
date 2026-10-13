@@ -672,6 +672,15 @@ jobs:
 
           # arm64ec 缓存变量：跳过编译期探测（交叉无法运行）
           export ac_cv_arm64ec_crosscc=yes
+          # freetype/fontconfig 交叉链接缓存（依赖链复杂，直接声明可用）
+          export ac_cv_lib_freetype_FT_Init_FreeType=yes
+          export ac_cv_lib_fontconfig_FcInit=yes
+          export ac_cv_header_ft2build_h=yes
+          export ac_cv_header_fontconfig_fontconfig_h=yes
+          export FREETYPE_CFLAGS="-I/usr/aarch64-linux-gnu/include/freetype2"
+          export FONTCONFIG_CFLAGS="-I/usr/aarch64-linux-gnu/include"
+          export FONTCONFIG_LIBS="-lfontconfig"
+          export LIBS="-lz -lbz2 -lpng16 -lbrotlidec -lharfbuzz -lexpat -luuid"
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__subsystem_console__Wl__WX=yes
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__no_default_config=yes
 
