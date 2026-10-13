@@ -341,14 +341,29 @@ jobs:
               fi
             done
             echo "ℹ️ 解出 $fetched 个 arm64 dev 包到 $ARM64_SYSROOT"
-            # 合并 Arch 自带的 aarch64 glibc sysroot（libc.so / crt 等）
-            if [ -d /usr/aarch64-linux-gnu ]; then
-              mkdir -p "$ARM64_SYSROOT/usr"
-              cp -a /usr/aarch64-linux-gnu "$ARM64_SYSROOT/usr/" 2>/dev/null || true
+            # 关键：把抽出的 arm64 头文件/库合并进 gcc 的默认 sysroot
+            #        /usr/aarch64-linux-gnu，否则 aarch64-linux-gnu-gcc 看不到它们。
+            ARCH_SYSROOT=/usr/aarch64-linux-gnu
+            if [ -d "$ARCH_SYSROOT" ]; then
+              mkdir -p "$ARCH_SYSROOT/include" "$ARCH_SYSROOT/lib"
+              # Debian multiarch: usr/include -> include, usr/lib/aarch64-linux-gnu -> lib
+              if [ -d "$ARM64_SYSROOT/usr/include" ]; then
+                cp -a "$ARM64_SYSROOT/usr/include/." "$ARCH_SYSROOT/include/" 2>/dev/null || true
+              fi
+              if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
+                cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/." "$ARCH_SYSROOT/lib/" 2>/dev/null || true
+              fi
+              # pkgconfig 合并（gcc 的 sysroot 下）
+              mkdir -p "$ARCH_SYSROOT/lib/pkgconfig"
+              if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig" ]; then
+                cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
+              fi
+              if [ -d "$ARM64_SYSROOT/usr/share/pkgconfig" ]; then
+                cp -a "$ARM64_SYSROOT/usr/share/pkgconfig/." "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null || true
+              fi
+              echo "✅ 已合并到 $ARCH_SYSROOT"
+              ls -la "$ARCH_SYSROOT/lib/libX11.so" "$ARCH_SYSROOT/include/X11/Xlib.h" 2>&1 | head -4 || true
             fi
-            # 生成 pkg-config 查找路径
-            mkdir -p "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/pkgconfig"
-            find "$ARM64_SYSROOT" -name '*.pc' -path '*pkgconfig*' 2>/dev/null | head -5 || true
             touch "${ARM64_SYSROOT}/.done"
             cd /tmp
           else
@@ -553,12 +568,15 @@ jobs:
           export ac_cv_arm64ec_cflags__target_arm64ec_windows__fuse_ld_lld__Wl__no_default_config=yes
 
           # arm64 sysroot（best-effort；找不到就 --without-x 等）
-          ARM64_LIBDIR="${ARM64_SYSROOT}/usr/lib/aarch64-linux-gnu"
-          if [ -d "$ARM64_LIBDIR" ]; then
-            export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig:${ARM64_SYSROOT}/usr/share/pkgconfig"
-            export PKG_CONFIG_LIBDIR="${ARM64_LIBDIR}/pkgconfig:${ARM64_SYSROOT}/usr/share/pkgconfig"
+          ARM64_LIBDIR="/usr/aarch64-linux-gnu/lib"
+          if [ -f "$ARM64_LIBDIR/libX11.so" ]; then
+            export PKG_CONFIG_PATH="${ARM64_LIBDIR}/pkgconfig"
+            export PKG_CONFIG_LIBDIR="${ARM64_LIBDIR}/pkgconfig"
+            export PKG_CONFIG_SYSROOT_DIR="/usr/aarch64-linux-gnu"
             XFLAGS="--with-x"
             VKFLAGS="--with-vulkan"
+            echo "✅ 使用 merged arm64 sysroot: $ARM64_LIBDIR"
+            ls "$ARM64_LIBDIR"/libX11.so "$ARM64_LIBDIR"/libvulkan.so 2>&1 | head -3 || true
           else
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
             export PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig:/usr/share/pkgconfig"
