@@ -344,6 +344,7 @@ jobs:
               [zlib1g-dev]="z/zlib"
               [libbz2-dev]="b/bzip2"
               [libbrotli-dev]="b/brotli"
+              [libpulse-dev]="p/pulseaudio"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -397,6 +398,21 @@ jobs:
               [libpng16-16]="libp/libpng1.6"
               [libjpeg62-turbo]="libj/libjpeg-turbo"
               [libbrotli1]="b/brotli"
+              [libpulse0]="p/pulseaudio"
+              [libasyncns0]="liba/libasyncns"
+              [libsndfile1]="libs/libsndfile"
+              [libflac12]="f/flac"
+              [libvorbis0a]="libv/libvorbis"
+              [libvorbisenc2]="libv/libvorbis"
+              [libogg0]="libo/libogg"
+              [libopus0]="o/opus"
+              [libmpg123-0]="m/mpg123"
+              [liblzma5]="x/xz-utils"
+              [libsystemd0]="s/systemd"
+              [libcap2]="libc/libcap2"
+              [libgcrypt20]="libg/libgcrypt20"
+              [libgpg-error0]="libg/libgpg-error"
+              [libapparmor1]="a/apparmor"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
