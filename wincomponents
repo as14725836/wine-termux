@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer
 from PyQt5.QtGui import (
     QPainter, QPainterPath, QRegion, QLinearGradient, QColor, QFont,
+    QFontMetrics, QPen, QBrush,
 )
 
 # ── 删除确认（沿用 dxvk 那套）─────────────────────────────
@@ -1934,6 +1935,25 @@ def _to_int(v):
         return 0
 
 
+def _split_path(path, width):
+    """长路径按 / 折行，缩进对齐 —— 免得提示被拉成一根横条。"""
+    path = str(path)
+    if len(path) <= width:
+        return [path]
+    parts = path.split("/")
+    out, cur = [], ""
+    for i, seg in enumerate(parts):
+        piece = seg if i == 0 else ("/" + seg if cur else seg)
+        if cur and len(cur) + len(piece) > width:
+            out.append(cur)
+            cur = "/" + seg if i else seg
+        else:
+            cur += piece
+    if cur:
+        out.append(cur)
+    return out
+
+
 def _wrap(text, width):
     """按字符数折行（中英混排够用；不追求像素级精确）。"""
     text = str(text)
@@ -1969,6 +1989,98 @@ CARD_H = 88           # 卡片高度：两行
 CARD_H_MINI = 88      # 统一高度，同行才齐
 
 
+class HoverTip(QWidget):
+    """自绘的半透明悬停提示。
+
+    为什么不用内建 QToolTip：Qt 会把 QToolTip 先画到一张不透明位图上，
+    stylesheet 里写 rgba(...) 也会被拍平成实色 —— 在深色界面上就是一块
+    黑方块。自己开一个 WA_TranslucentBackground 的浮层窗口才能真正透出底色。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(None)
+        self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint |
+                            Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._lines = []
+        self._pad = 10
+        self._radius = 10
+        self._font_pt = 11.0
+        self._fg = QColor(228, 237, 255)
+        self._bg = QColor(24, 34, 56, 208)      # ← 半透明，能看见后面的东西
+        self._bd = QColor(120, 190, 235, 160)
+        self.hide()
+
+    def _font(self):
+        f = QFont(self.font())
+        f.setPointSizeF(self._font_pt)
+        return f
+
+    def set_text(self, text, anchor_widget=None):
+        """按文字量算出尺寸并摆到锚点控件下方（摆不下就翻到上面）。"""
+        self._lines = [ln for ln in str(text).split("\n")]
+        fm = QFontMetrics(self._font())
+        tw = max((fm.horizontalAdvance(ln) for ln in self._lines), default=0)
+        th = fm.height() * max(1, len(self._lines))
+        w = tw + self._pad * 2 + 2
+        h = th + self._pad * 2 + 2
+        # 用锚点所在的屏幕（多屏时别用错）
+        g = None
+        if anchor_widget is not None:
+            try:
+                scr = QApplication.screenAt(anchor_widget.mapToGlobal(QPoint(0, 0)))
+            except Exception:
+                scr = None
+            if scr is None:
+                scr = QApplication.primaryScreen()
+        else:
+            scr = QApplication.primaryScreen()
+        if scr is not None:
+            g = scr.availableGeometry()
+            w = min(w, max(120, g.width() - 16))
+            h = min(h, max(60, g.height() - 16))
+        self.resize(w, h)
+
+        if anchor_widget is not None and g is not None:
+            try:
+                pos = anchor_widget.mapToGlobal(QPoint(0, anchor_widget.height()))
+                top = anchor_widget.mapToGlobal(QPoint(0, 0))
+            except Exception:
+                pos = None
+            if pos is not None:
+                x, y = pos.x(), pos.y() + 4
+                if x + w > g.right():
+                    x = g.right() - w - 4
+                if y + h > g.bottom():              # 下面放不下 -> 翻到上面
+                    y = top.y() - h - 4
+                if y < g.top():                     # 上面也放不下 -> 贴底
+                    y = g.bottom() - h - 4
+                x = max(g.left() + 4, x)
+                y = max(g.top() + 4, y)
+                self.move(x, y)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(QPen(self._bd, 1))
+        p.setBrush(QBrush(self._bg))
+        p.drawRoundedRect(r, self._radius, self._radius)
+
+        p.setFont(self._font())
+        p.setPen(self._fg)
+        fm = QFontMetrics(self._font())
+        y = self._pad + fm.ascent()
+        for ln in self._lines:
+            p.drawText(self._pad, y, ln)
+            y += fm.height()
+        p.end()
+
+
+
 class ComponentCard(QPushButton):
     """组件卡片：第一行组件名（+ ✓），第二行撞上dll 摘要。
 
@@ -1992,6 +2104,35 @@ class ComponentCard(QPushButton):
         self.setCheckable(False)
         self.setFocusPolicy(Qt.NoFocus)
         self.setFixedSize(self._w, self._h)
+        self._tip_text = ""
+
+    def set_tip_text(self, text):
+        """自绘浮层用的文本（同时也给 setToolTip 兜底）。"""
+        self._tip_text = str(text or "")
+        self.setToolTip(self._tip_text)
+
+    def enterEvent(self, event):
+        self._hover_show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_hide()
+        super().leaveEvent(event)
+
+    def _tip_host(self):
+        """找到能弹浮层的顶层窗口。"""
+        w = self.window()
+        return w if hasattr(w, "_show_hover_tip") else None
+
+    def _hover_show(self):
+        host = self._tip_host()
+        if host is not None and self._tip_text:
+            host._show_hover_tip(self._tip_text, self)
+
+    def _hover_hide(self):
+        host = self._tip_host()
+        if host is not None:
+            host._hide_hover_tip()
 
     def set_width(self, w):
         """由布局按列数算出来的宽度。"""
@@ -2478,7 +2619,8 @@ class WinComponentsDialog(QDialog):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.status_label.setMinimumWidth(10)
-        self.status_label.setToolTip(self._env_tooltip())
+        self.status_label.setToolTip(self._env_tooltip())   # 兜底（长按等）
+        self.status_label.installEventFilter(self)          # 悬停走自绘浮层
         layout.addWidget(self.status_label)
 
         # 流式卡片区域
@@ -2506,7 +2648,7 @@ class WinComponentsDialog(QDialog):
             b = QPushButton(desc)
             b.setObjectName("setBtn")
             b.setCheckable(True)
-            b.setToolTip("把 prefix 报成 " + val)
+            self._attach_hover_tip(b, "把 prefix 报成 " + val)
             if val == self._cur_win:
                 b.setChecked(True)
             self.win_group.addButton(b, i)
@@ -2524,14 +2666,14 @@ class WinComponentsDialog(QDialog):
         for label, ids in BUNDLES:
             b = QPushButton(label)
             b.setObjectName("setBtn")
-            b.setToolTip("装：" + ", ".join(ids))
+            self._attach_hover_tip(b, "装：" + _wrap(", ".join(ids), 34))
             b.clicked.connect(lambda ch, i=ids, l=label: self._install_bundle(l, i))
             row_cfg.addWidget(b)
         row_cfg.addStretch()
 
         delb = QPushButton("删除…")
         delb.setObjectName("delBtn")
-        delb.setToolTip("勾选要删掉的包（可多选）后一次性删除")
+        self._attach_hover_tip(delb, "勾选要删掉的包（可多选）后一次性删除")
         delb.clicked.connect(self._delete_multi)
         row_cfg.addWidget(delb)
 
@@ -2691,7 +2833,7 @@ class WinComponentsDialog(QDialog):
                 tip += "\n装这些：" + _wrap(head, 34)
             tip += "\n状态：已安装（再点一下重装）" if inst else "\n点一下安装"
             tip = _wrap_tooltip(tip)
-            card.setToolTip(tip)
+            card.set_tip_text(tip)
             card.clicked.connect(lambda checked, n=name: self._click_component(n))
             card.installEventFilter(self)
             self.flow.addWidget(card)
@@ -2752,20 +2894,55 @@ class WinComponentsDialog(QDialog):
             self.status_label.setText(msg if ok else "失败：" + msg)
         QTimer.singleShot(200, check)
 
+    # ── 自绘悬停浮层 ─────────────────────────────────────
+    def _attach_hover_tip(self, widget, text):
+        """给普通控件（按钮等）挂自绘浮层，替代内建的黑色 tooltip。"""
+        widget.setProperty("_hover_text", str(text))
+        widget.setToolTip(str(text))        # 兜底
+        widget.setAttribute(Qt.WA_Hover, True)
+        widget.installEventFilter(self)
+        return widget
+
+    def _show_hover_tip(self, text, anchor):
+        """弹出自绘半透明提示（内建 QToolTip 在深色界面上会是黑方块）。"""
+        if not text:
+            return
+        tip = getattr(self, "_hover_tip", None)
+        if tip is None:
+            tip = HoverTip()
+            self._hover_tip = tip
+        tip.set_text(text, anchor)
+        tip.show()
+        tip.raise_()
+
+    def _hide_hover_tip(self):
+        tip = getattr(self, "_hover_tip", None)
+        if tip is not None:
+            tip.hide()
+
+    def closeEvent(self, event):
+        self._hide_hover_tip()
+        tip = getattr(self, "_hover_tip", None)
+        if tip is not None:
+            tip.deleteLater()
+            self._hover_tip = None
+        super().closeEvent(event)
+
     def _env_tooltip(self):
         """悬停状态行才显示完整路径 —— 平时不占地方。"""
         name, pfx, root = read_wine_config()
-        lines = ["wine    : %s" % (name or "?")]
-        lines.append("prefix  : %s" % (pfx or "?"))
-        if root:
-            lines.append("wine 根 : %s" % root)
+        lines = ["wine: %s" % (name or "?")]
+        if pfx:
+            lines.append("prefix:")
+            lines.extend("  " + x for x in _split_path(pfx, 40))
         tgt = get_wine_target_dir()
-        if tgt:
-            lines.append("安装到  : %s" % tgt)
+        if tgt and tgt != pfx:
+            lines.append("安装到:")
+            lines.extend("  " + x for x in _split_path(tgt, 40))
         ver = read_current_windows_version()
         if ver:
-            lines.append("版本    : %s" % ver)
-        return _wrap_tooltip("\n".join(lines), 44)
+            lines.append("版本: %s" % ver)
+        return "\n".join(lines)
 
     def _card_by_name(self, name):
         """按组件名找到当前显示的那张卡片。"""
@@ -2823,6 +3000,24 @@ class WinComponentsDialog(QDialog):
         QTimer.singleShot(200, check)
 
     def eventFilter(self, obj, event):
+        # 状态行悬停 -> 自绘浮层（显示 wine/prefix 完整路径）
+        if obj is getattr(self, "status_label", None):
+            if event.type() == event.Enter:
+                self._show_hover_tip(self._env_tooltip(), obj)
+            elif event.type() == event.Leave:
+                self._hide_hover_tip()
+            return super().eventFilter(obj, event)
+
+        # 其他挂了 _hover_text 的控件（按钮等）
+        if event.type() in (event.Enter, event.Leave) and obj is not self:
+            txt = obj.property("_hover_text") if hasattr(obj, "property") else None
+            if txt:
+                if event.type() == event.Enter:
+                    self._show_hover_tip(txt, obj)
+                else:
+                    self._hide_hover_tip()
+                return super().eventFilter(obj, event)
+
         if event.type() == event.MouseButtonPress:
             if event.button() == Qt.LeftButton:
                 if isinstance(obj, QScrollBar) or obj.parent() and isinstance(obj.parent(), QScrollBar):
