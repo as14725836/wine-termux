@@ -1,73 +1,70 @@
-# wincomponents GUI
+# wincomponents
 
-> 源码：[`as14725836/wine-termux`](https://github.com/as14725836/wine-termux/blob/main/wincomponents)
+Windows 组件安装器（PyQt5，单文件）。界面和交互与 `dxvk` 版本选择器完全一致：
+同一套深蓝渐变、流式卡片、拖拽缩放、单实例窗口、删除确认框。
 
-给 Termux / Mobox 环境用的 **Windows 组件安装器**，界面和交互跟
-[DXVK 版本选择器](dxvk) 完全一致（同一个 FlowLayout 流式卡片、同一套深蓝渐变
-圆角窗口、同一套拖拽/缩放/删除对话框），只是把「DXVK 版本包」换成了
-「Windows 组件」。
+**打开就列出组件，点一下卡片 = 自动下载并装进当前 wine。** 不需要准备任何别的文件。
 
-## 它干什么
-
-点一个组件卡片 = 把这个组件装进**当前正在用的那个 Wine prefix**。
-
-组件包括 VC++ 运行库、DirectX（d3dx9/d3dx11/d3dcompiler）、XInput、OpenAL、
-XAudio、MSXML、quartz、gdiplus、mfc42、Windows 版本伪装等等。
-
-## 环境是自动读的
-
-和 DXVK 版本选择器读的是**同一个文件、同一个逻辑**：
-
-```
-wine_path.conf  →  export WINEPREFIX=...
-                →  basename(dirname(prefix))  = 当前 wine 目录名
-```
-
-所以界面顶部显示的 `当前 wine: wine-10.0-3proton-vanilla-wow64` 就是你
-模拟器此刻在用的那套 Wine，不需要手填。
-
-`--selftest` 可以不开窗先确认它认对了：
-
-```
-wincomponents --selftest
-```
-
-## 安装
+## 装
 
 ```sh
-# 需要 PyQt5
 pkg install python-pyqt5
-
 ./install.sh
+wincomponents --selftest   # 先确认认对了环境
+wincomponents               # 开界面
 ```
 
-## 组件从哪来
+## 它做什么
 
-两个来源，同名时 store 优先：
+点卡片：
 
-1. **store** — `wc-install` 下载解包的组件（默认 `~/.local/share/wincomponents`，
-   `WC_STORE` 可改）。带 DLL 覆盖设置和注册表写入。
-2. **本地包** — `$PREFIX/wincomponents/*.tar.xz`，和 `$PREFIX/dxvk/*.tar.gz` 平行。
+1. 从 DroidDeck 的公开组件目录下载对应的 `*.tar.xz`
+2. 解包，按 32/64 位分别放进 prefix 的
+   `drive_c/windows/syswow64/`（32 位）和 `drive_c/windows/system32/`（64 位）
+3. 写好 `WINEDLLOVERRIDES` 需要的那套 DLL overrides
+4. 记下状态；再点「删除…」勾选卸载时，会把覆盖掉的原文件**原样还原**
 
-有 `wc-install` / `wc-apply` 时走完整的 store 流程（会写 `WINEDLLOVERRIDES`
-和注册表）；没有时退回「直接把包解到 `drive_c/windows/`」——和 DXVK 版本选择器
-一模一样的做法。
+## 环境怎么认的
 
-## 界面
+和 `dxvk` 版本选择器走同一条路：
 
-- **搜索框** — 过滤组件
-- **卡片区** — 点一下即装，装过的带 ✓
-- **版本** — XP / Win7 / Win10，点了就改 prefix 的 `CurrentVersion`
-- **一键** — 「常用库 / 老游戏 / DirectX」三组常用组合，一次装一批
-- **删除…** — 勾选多个包一次性删掉（只删 `$PREFIX/wincomponents/` 里的）
-- **取消** — 关窗
+```
+glibc/opt/conf/wine_path.conf  →  WINEPREFIX  →  当前 wine 目录
+```
 
-窗口可以拖拽移动、右下角缩放，和 DXVK 版一致。
+认到哪个 wine，组件就装进那个 prefix。界面顶部一直显示当前 wine + prefix。
+
+每个 prefix 有一个稳定的 id（`prefix 路径的 sha1`），所以换 wine 之后
+各 prefix 的组件选择互不干扰。
+
+## 只列能一键装的
+
+组件目录里有 123 个，本程序只列出**不需要 Windows 安装器**的那 63 个
+（即只用解压 + 拷贝 DLL + 写 overrides 就能装好的）。
+
+另外 60 个（`dotnet*`、`vcredist2013` 这种非 `_dll` 版、`K-Lite` …）需要在
+Windows 里真的跑 `install_exe` / `install_msi`，界面里**不列**，状态行会提示
+还有多少个被跳过。
+
+## 缓存
+
+- 组件目录：`~/.cache/wincomponents/components.json`（6 小时）
+- 下载的包：`~/.cache/wincomponents/downloads/`
+- 解包结果（store）：`~/.local/share/wincomponents/`
+- 每个 prefix 的状态/备份：`~/.cache/wincomponents/<hash>/`
+
+`--refresh` 强制重拉目录。
+
+可用环境变量覆盖：`WC_STORE` `WC_CACHE` `WC_INSTALL_CACHE` `WC_SELECTION`。
+
+## 卸载一个组件
+
+点右下角「删除…」，勾选要撤掉的组件，确认。被这些组件覆盖过的 Wine 原文件
+会从备份还原回原位。
 
 ## 安全
 
-- 只写当前 prefix 的 `drive_c/windows/`（加 `WINEDLLOVERRIDES` / 注册表）
-- 删除操作限定在 `$PREFIX/wincomponents/` 里，越界拒绝
-- `wc-apply` 的状态文件和备份放在 `~/.cache/wincomponents/<hash>/`，
-  不往用户 prefix 里塞东西
-- 卸载（取消勾选后重新应用）会精确还原被替换的文件和注册表值
+- 只往当前 prefix 的 `drive_c/windows/` 里写
+- 覆盖前先把原文件备份进 `~/.cache/wincomponents/<hash>/.wc-apply-backup/`
+- 组件名做白名单校验（`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`）
+- 下载走 HTTPS，带 md5 校验（目录里给的那份）
