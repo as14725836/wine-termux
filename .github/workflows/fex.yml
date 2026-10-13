@@ -171,10 +171,25 @@ jobs:
           set -eux
           GH_TOKEN="GH_TOKEN_PLACEHOLDER"
           # Arch 基础依赖：FEX 编译需要 cmake/ninja/python + 一堆库
-          pacman -Sy --noconfirm --needed \
+          # 注意：这里必须做 full upgrade (-Syu)。只做 -Sy 会造成「部分升级」：
+          # ccache 被升到新版但其新依赖（hiredis / libhiredis.so.1.4.0）没升，
+          # 于是 `/usr/sbin/ccache: error while loading shared libraries: libhiredis.so.1.4.0`。
+          pacman -Syu --noconfirm || true
+          pacman -S --noconfirm --needed \
             base-devel cmake ninja python python-pip git curl wget \
-            xz unzip file ccache || true
+            xz unzip file ccache hiredis || true
+          # 补一次 hiredis / ccache（防 -Sy 遗留的 ABI 错配）
+          pacman -S --noconfirm --needed hiredis ccache || true
           pacman -S --noconfirm --needed nasm pkgconf || true
+
+          # ccache 可用性自检：坏掉就禁用，避免整个 FEX 构建被拖死
+          if ! ccache --version >/dev/null 2>&1; then
+            echo "⚠️ ccache 不可用（缺依赖），本次禁用 ccache"
+            rm -f /usr/local/bin/ccache /usr/bin/ccache /usr/sbin/ccache 2>/dev/null || true
+            export CCACHE_DISABLE=1
+          else
+            echo "✅ ccache: $(ccache --version | head -1)"
+          fi
 
           # ---- llvm-mingw（ARM64EC PE 交叉工具链）----
           DISTRO="LLVM_MINGW_DISTRO_PLACEHOLDER"
@@ -329,6 +344,20 @@ jobs:
 
           export USE_CACHE="${USE_CACHE:-1}"
           export CCACHE_DIR="${CCACHE_DIR:-/root/.cache/ccache}"
+          # ccache 健全性检查：某些镜像快照里 ccache 的新版依赖缺失，
+          # 会让每次编译都以 Error 127 失败。检测到就直接禁用它。
+          if ! ccache --version >/dev/null 2>&1; then
+            echo "⚠️ ccache 运行时不可用 -> 安装透明 wrapper 直通编译器，并禁用缓存"
+            export CCACHE_DISABLE=1
+            export USE_CACHE=0
+            # cmake 会探测 ccache；装个直通 wrapper，避免它把 ccache 塞进
+            # CMAKE_C_COMPILER_LAUNCHER 后每次调用都 Error 127
+            for d in /usr/local/bin /usr/bin /usr/sbin; do
+              mkdir -p "$d" 2>/dev/null || true
+              printf '%s\n' '#!/bin/sh' 'exec "$@"' > "$d/ccache" 2>/dev/null || true
+              chmod +x "$d/ccache" 2>/dev/null || true
+            done
+          fi
           [ "${USE_CACHE}" = "1" ] && [ -f /tmp/ccache.tar.xz ] && { mkdir -p ~/.cache; tar xf /tmp/ccache.tar.xz -C ~/.cache/ || true; }
 
           # ================= arm64ecfex (x86_64 模拟) =================
