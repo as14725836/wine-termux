@@ -26,9 +26,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLayout, QWidget, QLabel, QLineEdit,
     QPushButton, QApplication, QCheckBox, QScrollArea, QFrame, QSizePolicy,
-    QScrollBar, QButtonGroup, QToolTip,
+    QScrollBar, QButtonGroup, QToolTip, QProgressBar,
 )
-from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer, QObject, QEvent
+from PyQt5.QtCore import (Qt, QRect, QRectF, QSize, QPoint, QTimer, QObject, QEvent,
+                          pyqtSignal)
 from PyQt5.QtGui import (
     QPainter, QPainterPath, QRegion, QLinearGradient, QColor, QFont,
     QFontMetrics, QPen, QBrush,
@@ -520,7 +521,12 @@ def fetch_json(url):
         return json.loads(r.read().decode("utf-8"))
 
 
-def download(url, dest, checksum=None):
+def download(url, dest, checksum=None, progress=None):
+    """下载一个文件。
+
+    progress(done, total, filename) 会被反复调用（total 为 0 表示长度未知），
+    界面靠它画进度条。
+    """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "wc-install"})
@@ -536,8 +542,18 @@ def download(url, dest, checksum=None):
             if size:
                 pct = total * 100 // size
                 sys.stderr.write("\r  %s %d%% (%d/%d)" % (dest.name, pct, total, size))
+            if progress is not None:
+                try:
+                    progress(total, size, dest.name)
+                except Exception:
+                    pass
         if size:
             sys.stderr.write("\r" + " " * 60 + "\r")
+    if progress is not None:
+        try:
+            progress(total, size or total, dest.name)
+        except Exception:
+            pass
     if checksum:
         got = _md5(dest)
         if got != checksum.lower():
@@ -647,7 +663,8 @@ def _safe_extract_tar(tar, into):
 def resolve_tail(cache, work, url):
     """The extracted thing a catalog-relative url means, matched on its trailing parts."""
     parts = [p for p in url.strip("/").split("/") if p and p != "temp"]
-    for base in (cache, work):
+    # cache/work 可能是 str（cache_dir() 返回的就是）—— 统一成 Path 再拼
+    for base in (Path(cache), Path(work)):
         cand = base
         for part in parts:
             nxt = cand / part
@@ -717,7 +734,7 @@ def support(c):
 
 # ------------------------------------------------------------------ install
 
-def install(component, store, cache, verbose=True):
+def install(component, store, cache, verbose=True, progress=None):
     name = component["name"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
         raise SystemExit("unsafe component name %r" % name)
@@ -750,7 +767,7 @@ def install(component, store, cache, verbose=True):
                 dest = Path(cache) / fname
                 if not dest.exists():
                     note("download %s" % fname)
-                    download(url, dest, step.get("file_checksum"))
+                    download(url, dest, step.get("file_checksum"), progress=progress)
                 else:
                     note("cached   %s" % fname)
                 src = dest
@@ -1782,7 +1799,7 @@ def installed_ids(appid, pfx=None):
     return load_state(_P(compat)).get("components", []) or []
 
 
-def do_install(catalog, name, log=None):
+def do_install(catalog, name, log=None, progress=None):
     """下载并解包一个组件进 store。返回 (文件数, overrides)。"""
     comp = find(catalog, name)
     if comp is None:
@@ -1790,7 +1807,7 @@ def do_install(catalog, name, log=None):
     kind, why = support(comp)
     if kind != "file":
         raise RuntimeError(why or "需要 Windows 安装器")
-    return install(comp, store_dir(), cache_dir(), verbose=False)
+    return install(comp, store_dir(), cache_dir(), verbose=False, progress=progress)
 
 
 def do_apply(appid, ids, pfx=None, log=None):
@@ -2369,6 +2386,21 @@ QLabel#statusLabel {
     color: #88ddff;
     padding: 2px 0;
 }
+/* 安装进度条：跟主题一套色 */
+QProgressBar#installBar {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(180, 220, 255, 0.22);
+    border-radius: 9px;
+    font-size: 10pt;
+    color: #e4edff;
+    text-align: center;
+    padding: 0;
+}
+QProgressBar#installBar::chunk {
+    border-radius: 8px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #4aa3ff, stop:1 #7be0ff);
+}
 QLineEdit {
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(180, 220, 255, 0.25);
@@ -2497,6 +2529,15 @@ def human_size(n):
         n /= 1024.0
 
 
+class _Progress(QObject):
+    """把后台线程的进度安全地送到 UI 线程。
+
+    Qt 不允许在非 UI 线程里直接改控件 —— 走信号排队就安全了。
+    """
+
+    changed = pyqtSignal(int, str)      # (百分比, 说明文字)
+
+
 def _worker(fn):
     """把 fn 丢到后台线程；返回 (thread, result_box)。"""
     import threading
@@ -2515,12 +2556,12 @@ def _worker(fn):
     return t, box
 
 
-def install_one(name, appid, catalog, pfx=None):
+def install_one(name, appid, catalog, pfx=None, progress=None):
     """下载 + 解包 + 应用到 prefix。返回一句给人看的话。"""
     pfx = pfx or wine_prefix_dir()
     if not pfx:
         return False, "没找到 wine prefix"
-    do_install(catalog, name)
+    do_install(catalog, name, progress=progress)
     ids = read_selection(appid)
     if name not in ids:
         ids.append(name)
@@ -2640,6 +2681,16 @@ class WinComponentsDialog(QDialog):
         self.status_label.installEventFilter(self)          # 悬停走自绘浮层
         layout.addWidget(self.status_label)
 
+        # 安装进度条：平时藏起来，装东西时才出现（在状态行正下方）
+        self.progress = QProgressBar()
+        self.progress.setObjectName("installBar")
+        self.progress.setTextVisible(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(18)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
         # 流式卡片区域
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(False)
@@ -2738,16 +2789,30 @@ class WinComponentsDialog(QDialog):
             self.status_label.setText("「%s」里的组件目录里都没有" % label)
             return
         self._set_busy(True, "正在装「%s」…（%d 个）" % (label, len(todo)))
+        self._progress_begin("装「%s」" % label)
         QApplication.processEvents()
+
+        # 按组件数平分进度
+        sig = _Progress(self)
+        sig.changed.connect(lambda pct, note: self._progress_set(pct, note))
+        total_n = len(todo)
 
         def work():
             done = []
-            for n in todo:
+            for i, n in enumerate(todo):
+                base = int(i * 100 / total_n)
+                span = 100.0 / total_n
+                # 每个组件：下载占 70%，解包/应用占剩下
+                def on_dl(d, t, fn, _b=base, _s=span):
+                    if t:
+                        sig.changed.emit(int(_b + d * _s * 0.7 / t), "%d/%d %s" % (i + 1, total_n, n))
                 try:
-                    install_one(n, self.appid, self.catalog, pfx=self.prefix)
+                    install_one(n, self.appid, self.catalog, pfx=self.prefix,
+                                progress=on_dl)
                     done.append(n)
                 except Exception:
                     pass
+                sig.changed.emit(int((i + 1) * 100 / total_n), "%d/%d %s" % (i + 1, total_n, n))
             return done
 
         t, box = _worker(work)
@@ -2871,6 +2936,27 @@ class WinComponentsDialog(QDialog):
         QTimer.singleShot(0, self._fit_width)
         QTimer.singleShot(0, self._update_scroll_size)
 
+    # ── 进度条 ───────────────────────────────────────────
+    def _progress_begin(self, label):
+        """显示进度条并归零。"""
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("%s  %%p" % label)
+        self.progress.setVisible(True)
+        self._progress_label = label
+
+    def _progress_set(self, pct, note=""):
+        """更新进度（0~100）。"""
+        pct = max(0, min(100, int(pct)))
+        self.progress.setValue(pct)
+        if note:
+            self.progress.setFormat(note + "  %p")
+
+    def _progress_end(self):
+        """装完了：进度条短暂停满格然后收起。"""
+        self.progress.setValue(100)
+        QTimer.singleShot(600, lambda: self.progress.setVisible(False))
+
     def _set_busy(self, busy, text=None):
         self._busy = busy
         if text:
@@ -2878,18 +2964,51 @@ class WinComponentsDialog(QDialog):
         for b in self.findChildren(QPushButton):
             if b.objectName() in ("compCard", "setBtn", "verBtn"):
                 b.setEnabled(not busy)
+        if not busy:
+            self._progress_end()
 
     def _click_component(self, name):
         """点卡片 = 没装就装、装了再点就重装（卸载走「删除…」）。"""
         if self._busy:
             return
         self._set_busy(True, "正在安装 %s …（下载 + 解包）" % name)
+        self._progress_begin("下载 " + name)
         QApplication.processEvents()
 
+        # 后台线程 -> UI 线程的进度信号
+        sig = _Progress(self)
+        sig.changed.connect(lambda pct, note: self._progress_set(pct, note))
+        state = {"downloaded": False}
+
+        def on_dl(done, total, fname):
+            if not total:
+                return
+            pct = int(done * 100 / total)
+            if pct >= 100:
+                state["downloaded"] = True          # 下载结束，接下来是解包
+            # 下载阶段占 0~80%
+            sig.changed.emit(min(80, int(pct * 80 / 100)), "下载 %s" % fname)
+
         def work():
-            return install_one(name, self.appid, self.catalog, pfx=self.prefix)
+            return install_one(name, self.appid, self.catalog, pfx=self.prefix,
+                               progress=on_dl)
 
         t, box = _worker(work)
+
+        def watch():
+            """下载完就进入解包/应用 —— 那两段没有字节进度，匀速爬到 95%。"""
+            if box["done"]:
+                return
+            if not state["downloaded"]:
+                QTimer.singleShot(300, watch)
+                return
+            v = self.progress.value()
+            if v < 80:
+                self._progress_set(80, "解包 / 应用")
+            elif v < 95:
+                self._progress_set(v + 1, "解包 / 应用")
+            QTimer.singleShot(300, watch)
+        QTimer.singleShot(300, watch)
 
         def check():
             if not box["done"]:
