@@ -506,6 +506,25 @@ jobs:
               done
               echo "--- 改写后的 libpulse.pc ---"
               cat "$ARCH_SYSROOT/lib/pkgconfig/libpulse.pc" 2>/dev/null | head -12 || true
+              echo "--- pkg-config libpulse 自检（交叉） ---"
+              export PKG_CONFIG_PATH="$ARCH_SYSROOT/lib/pkgconfig:$ARCH_SYSROOT/lib64/pkgconfig"
+              export PKG_CONFIG_LIBDIR="$ARCH_SYSROOT/lib/pkgconfig:$ARCH_SYSROOT/lib64/pkgconfig"
+              pkg-config --exists libpulse && echo "✅ pkg-config --exists libpulse OK" || echo "❌ pkg-config --exists libpulse FAIL"
+              pkg-config --cflags --libs libpulse 2>&1 | head -3 || true
+              echo "--- 手工 pulse 编译自检 ---"
+              cat > /tmp/pchk.c <<'PCEOF'
+          #include <pulse/pulseaudio.h>
+          #include <pulse/version.h>
+          #if PA_API_VERSION < 12
+          #error "pulse too old"
+          #endif
+          int main(void){ pa_mainloop *m = pa_mainloop_new(); pa_mainloop_free(m); return 0; }
+          PCEOF
+              if aarch64-linux-gnu-gcc $(pkg-config --cflags libpulse 2>/dev/null) /tmp/pchk.c -o /tmp/pchk $(pkg-config --libs libpulse 2>/dev/null) 2>/tmp/pchk.err; then
+                echo "✅ pulse 编译自检 OK"
+              else
+                echo "❌ pulse 编译自检 失败"; head -25 /tmp/pchk.err || true
+              fi
               echo "✅ 已合并到 $ARCH_SYSROOT"
               echo "--- sysroot 自检 ---"
               ls -la "$ARCH_SYSROOT"/lib/libX11.so* "$ARCH_SYSROOT"/lib/libfreetype.so* 2>&1 | head -12 || true
@@ -738,6 +757,10 @@ jobs:
           # freetype/fontconfig 交叉链接缓存（依赖链复杂，直接声明可用）
           export ac_cv_lib_freetype_FT_Init_FreeType=yes
           export ac_cv_lib_fontconfig_FcInit=yes
+          export ac_cv_lib_pulse_pa_mainloop_new=yes
+          export ac_cv_lib_pulse_pa_stream_connect_playback=yes
+          export ac_cv_header_pulse_pulseaudio_h=yes
+          export ac_cv_header_pulse_version_h=yes
           export ac_cv_header_ft2build_h=yes
           export ac_cv_header_fontconfig_fontconfig_h=yes
           export FREETYPE_CFLAGS="-I/usr/aarch64-linux-gnu/include/freetype2"
