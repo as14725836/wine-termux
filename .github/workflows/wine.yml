@@ -757,6 +757,24 @@ jobs:
             :
           done
 
+          # 5.8b C23 `bool` 关键字兼容（Pipetto/wine proton-9.0-arm64ec 等旧分支）
+          #      旧代码: `struct sysparam_bool_entry bool;` 与 `{ .bool = {...} }`
+          #      C23 下 bool 是关键字 -> "expected identifier before 'bool'"
+          if [ -f dlls/win32u/sysparams.c ]; then
+            if grep -qE 'struct[[:space:]]+sysparam_bool_entry[[:space:]]+bool[[:space:]]*;' dlls/win32u/sysparams.c; then
+              echo "--- C23 bool 关键字兼容: sysparams.c (bool -> boolean) ---"
+              sed -i -E 's/(struct[[:space:]]+sysparam_bool_entry[[:space:]]+)bool([[:space:]]*;)/\1boolean\2/g' dlls/win32u/sysparams.c
+              sed -i -E 's/\.bool([[:space:]]*=)/.boolean\1/g' dlls/win32u/sysparams.c
+              grep -nE 'sysparam_bool_entry[[:space:]]+boolean|\.boolean[[:space:]]*=' dlls/win32u/sysparams.c | head -8 || true
+            fi
+          fi
+          # 5.8c 其它把 bool 当成员名的文件（仅报告，不自动改以免误伤）
+          BOOL_HITS=$(grep -rlE '(struct|union)[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]+bool[[:space:]]*(;|,)' dlls/ 2>/dev/null | head -20 || true)
+          if [ -n "$BOOL_HITS" ]; then
+            echo "以下文件把 bool 用作成员名（C23 下会报错），若再次失败请一并处理:"
+            echo "$BOOL_HITS"
+          fi
+
           # 5.9 清理补丁残留（不因 .rej 中止，但打印出来）
           if find . -name '*.rej' | grep -q .; then
             echo "⚠️ 存在未应用的补丁片段（已清理，不影响构建）:"
@@ -1059,6 +1077,7 @@ jobs:
           echo " ✅ 构建完成: $BUILD_NAME"
           ls -la "/tmp/${BUILD_NAME}.tar.xz"
           echo "=============================================="
+
 
           ARMT
           sudo cp -f /tmp/archlinux/tmp/arm64-build.sh.tpl /tmp/arm64-build.sh.tpl
