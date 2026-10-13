@@ -26,9 +26,9 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLayout, QWidget, QLabel, QLineEdit,
     QPushButton, QApplication, QCheckBox, QScrollArea, QFrame, QSizePolicy,
-    QScrollBar, QButtonGroup,
+    QScrollBar, QButtonGroup, QToolTip,
 )
-from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer
+from PyQt5.QtCore import Qt, QRect, QRectF, QSize, QPoint, QTimer, QObject, QEvent
 from PyQt5.QtGui import (
     QPainter, QPainterPath, QRegion, QLinearGradient, QColor, QFont,
     QFontMetrics, QPen, QBrush,
@@ -344,7 +344,10 @@ class _DelPickDialog(QDialog):
             except Exception:
                 pass
             cb.setText(txt)
-            cb.setToolTip(path)
+            cb.setToolTip("")
+            cb.setProperty("_hover_text", path)
+            cb.setAttribute(Qt.WA_Hover, True)
+            cb.installEventFilter(self._tip_owner or self)
             cb.toggled.connect(self._sync)
             v.addWidget(cb)
             self._boxes.append((cb, path, nm, cur))
@@ -2081,6 +2084,19 @@ class HoverTip(QWidget):
 
 
 
+class _NoToolTipFilter(QObject):
+    """全局吃掉 QEvent.ToolTip —— 免得任何控件弹出内建的黑方块提示。
+
+    自绘的 HoverTip 走 enterEvent/eventFilter，不依赖 ToolTip 事件，不受影响。
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ToolTip:
+            QToolTip.hideText()
+            return True          # 吃掉，不让 Qt 自己弹
+        return False
+
+
 class ComponentCard(QPushButton):
     """组件卡片：第一行组件名（+ ✓），第二行撞上dll 摘要。
 
@@ -2107,9 +2123,9 @@ class ComponentCard(QPushButton):
         self._tip_text = ""
 
     def set_tip_text(self, text):
-        """自绘浮层用的文本（同时也给 setToolTip 兜底）。"""
+        """只给自绘浮层用 —— 绝不设内建 tooltip（那是黑方块的来源）。"""
         self._tip_text = str(text or "")
-        self.setToolTip(self._tip_text)
+        self.setToolTip("")
 
     def enterEvent(self, event):
         self._hover_show()
@@ -2619,7 +2635,8 @@ class WinComponentsDialog(QDialog):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.status_label.setMinimumWidth(10)
-        self.status_label.setToolTip(self._env_tooltip())   # 兜底（长按等）
+        self.status_label.setToolTip("")                    # 内建 tooltip 一律不用
+        self.status_label.setAttribute(Qt.WA_Hover, True)
         self.status_label.installEventFilter(self)          # 悬停走自绘浮层
         layout.addWidget(self.status_label)
 
@@ -2898,7 +2915,7 @@ class WinComponentsDialog(QDialog):
     def _attach_hover_tip(self, widget, text):
         """给普通控件（按钮等）挂自绘浮层，替代内建的黑色 tooltip。"""
         widget.setProperty("_hover_text", str(text))
-        widget.setToolTip(str(text))        # 兜底
+        widget.setToolTip("")               # 内建 tooltip 一律不用（黑方块）
         widget.setAttribute(Qt.WA_Hover, True)
         widget.installEventFilter(self)
         return widget
@@ -3150,9 +3167,9 @@ if __name__ == "__main__":
     if QApplication.instance() is None:
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
-        # tooltip 是顶层窗口，dialog 上的样式表管不到它 ——
-        # 必须在 QApplication 上设一次，否则在深色窗口上会渲染成黑方块。
-        app.setStyleSheet(QToolTip_STYLE)
+        # 内建 QToolTip 一律不用（它会渲染成黑方块）。
+        # 这里再兜一层：全局装一个事件过滤器，把所有 ToolTip 事件吃掉。
+        app.installEventFilter(_NoToolTipFilter(app))
 
     # ===== 单实例：QLocalServer 保证同时只有一个窗口 =====
     from PyQt5.QtNetwork import QLocalServer, QLocalSocket
