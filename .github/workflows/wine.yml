@@ -479,6 +479,26 @@ jobs:
               if [ -d "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu" ]; then
                 cp -a "$ARM64_SYSROOT/usr/lib/aarch64-linux-gnu/." "$ARCH_SYSROOT/lib/" 2>/dev/null || true
               fi
+              # pulseaudio 把 libpulsecommon-XX.so 放在 lib/pulseaudio/ 子目录，
+              # 链接器不会递归搜索子目录 → 平铺软链到 lib/ 顶层
+              if [ -d "$ARCH_SYSROOT/lib/pulseaudio" ]; then
+                ( cd "$ARCH_SYSROOT/lib/pulseaudio" && for f in *.so*; do
+                    [ -e "$f" ] || continue
+                    [ -e "$ARCH_SYSROOT/lib/$f" ] || ln -sf "pulseaudio/$f" "$ARCH_SYSROOT/lib/$f"
+                  done ) || true
+                echo "--- pulseaudio 平铺后 ---"
+                ls -la "$ARCH_SYSROOT"/lib/libpulsecommon* 2>&1 | head -5 || true
+              else
+                echo "⚠️ 未发现 $ARCH_SYSROOT/lib/pulseaudio 目录"
+              fi
+              # libpulsecommon 依赖 libsndfile/flac/vorbis 等：同样平铺
+              for sub in sndfile pulseaudio; do
+                [ -d "$ARCH_SYSROOT/lib/$sub" ] || continue
+                ( cd "$ARCH_SYSROOT/lib/$sub" && for f in *.so*; do
+                    [ -e "$f" ] || continue
+                    [ -e "$ARCH_SYSROOT/lib/$f" ] || ln -sf "$sub/$f" "$ARCH_SYSROOT/lib/$f"
+                  done ) || true
+              done
               # gcc 的默认库目录是 <sysroot>/lib64（不是 lib）→ 把 lib 内容同步过去
               mkdir -p "$ARCH_SYSROOT/lib64"
               cp -a "$ARCH_SYSROOT/lib/." "$ARCH_SYSROOT/lib64/" 2>/dev/null || true
@@ -520,7 +540,7 @@ jobs:
           #endif
           int main(void){ pa_mainloop *m = pa_mainloop_new(); pa_mainloop_free(m); return 0; }
           PCEOF
-              if aarch64-linux-gnu-gcc $(pkg-config --cflags libpulse 2>/dev/null) /tmp/pchk.c -o /tmp/pchk $(pkg-config --libs libpulse 2>/dev/null) 2>/tmp/pchk.err; then
+              if aarch64-linux-gnu-gcc $(pkg-config --cflags libpulse 2>/dev/null) /tmp/pchk.c -o /tmp/pchk $(pkg-config --libs libpulse 2>/dev/null) -Wl,-rpath-link,"$ARCH_SYSROOT/lib/pulseaudio" 2>/tmp/pchk.err; then
                 echo "✅ pulse 编译自检 OK"
               else
                 echo "❌ pulse 编译自检 失败"; head -25 /tmp/pchk.err || true
