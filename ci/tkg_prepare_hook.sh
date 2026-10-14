@@ -203,6 +203,46 @@ fi
     find . -name '*.rej'
   fi
   
+  # ---- machine-id 路径（Termux）----
+  # Wine 从 machine-id 派生本地用户 SID 与系统 UUID：
+  #   dlls/ntdll/unix/system.c  get_system_uuid()  -> /var/lib/dbus/machine-id
+  #   server/token.c            init_user_sid()    -> /etc/machine-id  (Valve/Proton 独有)
+  # Termux 上这两个路径读不到 -> SID 退化、系统 UUID 全 FF，授权/防盗版/存档校验类
+  # 程序行为异常。直接改成 Termux glibc 路径，不做原路径回退。
+  _MID="/data/data/com.termux/files/usr/glibc/etc/machine-id"
+  if [ -f "dlls/ntdll/unix/system.c" ]; then
+    if grep -q '"/var/lib/dbus/machine-id"' dlls/ntdll/unix/system.c; then
+      sed -i "s|\"/var/lib/dbus/machine-id\"|\"${_MID}\"|g" dlls/ntdll/unix/system.c
+      msg2 "machine-id: system.c 已改指 ${_MID}"
+    else
+      msg2 "machine-id: system.c 无需处理（或已处理）"
+    fi
+  fi
+  if [ -f "server/token.c" ]; then
+    if grep -q 'fopen( "/etc/machine-id"' server/token.c; then
+      sed -i "s|fopen( \"/etc/machine-id\", \"r\" )|fopen( \"${_MID}\", \"r\" )|g" server/token.c
+      sed -i "s|Failed to open /etc/machine-id|Failed to open ${_MID}|g" server/token.c
+      sed -i "s|Failed to read /etc/machine-id|Failed to read ${_MID}|g" server/token.c
+      msg2 "machine-id: token.c 已改指 ${_MID}"
+    elif grep -q "${_MID}" server/token.c; then
+      msg2 "machine-id: token.c 已处理，跳过"
+    else
+      msg2 "machine-id: token.c 无 init_user_sid（上游无此特性），跳过"
+    fi
+  else
+    msg2 "machine-id: 没有 server/token.c，跳过"
+  fi
+  # 注意：grep -c 无匹配时退出码非 0，直接 `|| echo 0` 会多打一行，故先 `|| true`
+  _MIDSYS=$( { grep -c "${_MID}" dlls/ntdll/unix/system.c 2>/dev/null || true; } | head -1 )
+  _MIDTOK=$( { grep -c "${_MID}" server/token.c 2>/dev/null || true; } | head -1 )
+  _MIDOLD=$( { grep -c '"/var/lib/dbus/machine-id"' dlls/ntdll/unix/system.c 2>/dev/null || true; } | head -1 )
+  _MIDSYS=${_MIDSYS:-0}; _MIDTOK=${_MIDTOK:-0}; _MIDOLD=${_MIDOLD:-0}
+  msg2 "machine-id check: system.c=${_MIDSYS} token.c=${_MIDTOK} leftover_system=${_MIDOLD}"
+  if [ "${_MIDSYS}" = "0" ] || [ "${_MIDOLD}" != "0" ]; then
+    echo "!!! FAIL: machine-id 路径未完成适配 (system.c=${_MIDSYS} leftover=${_MIDOLD})"
+    exit 1
+  fi
+
   # --- self check (visible in log) ---
   msg2 "self-check colour.c: $(ls dlls/quartz/colour.c 2>/dev/null || echo MISSING)"
   msg2 "self-check dns: $(grep -c init_dns_config dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
