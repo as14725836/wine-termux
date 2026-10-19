@@ -66,6 +66,12 @@ jobs:
           if [ -n "$CUSTOM_TAG" ]; then
             echo "Use custom tag from manual dispatch: $CUSTOM_TAG"
             latest_tag="$CUSTOM_TAG"
+            # 归一化：允许填裸版本号（11.20）或完整 tag（wine-11.20）
+            case "$latest_tag" in
+              wine-*) : ;;
+              *)      latest_tag="wine-$latest_tag" ;;
+            esac
+            echo "Normalized tag: $latest_tag"
           else
             latest_tag=$(git ls-remote --tags https://github.com/wine-mirror/wine.git | \
               grep -Ev '\^\{\}$' | sed 's/.*\///' | grep -E '^wine-[0-9]+\.[0-9]+.*$' | sort -V | tail -n 1)
