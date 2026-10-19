@@ -1,4 +1,9 @@
 file_path=$2
+# 归一化：允许传入裸版本号（11.20），自动补 wine- 前缀
+case "$1" in
+  wine-*) : ;;
+  [0-9]*) set -- "wine-$1" "${@:2}" ;;
+esac
 sed2() {
   local file="$file_path2"
   local key="$1"
