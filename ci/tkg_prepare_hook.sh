@@ -54,13 +54,16 @@ _termux_path_fix() {
   fi
   # ---- mfplat patch end ----
   # ---- adapted-11.18 user patches ----
+  # 注意：wine-box64-compat.patch / wine-box64-noexec.patch 不再走 patch -p1。
+  # 它们按 wine-9.x/10.x 行号编写，在 wine 11.x 上 Hunk #1 必 FAILED 而
+  # Hunk #2 因 fuzz 命中，导致 virtual.c 出现「有调用、无定义」并编译失败；
+  # 且 clamp 会漂到 virtual_get_system_info() 而非 virtual_init()。
+  # 现改为下方 fix_box64_compat.py 的锚点式幂等注入。
   for _up in 0060-quartz-implement-colour-filter.patch \
              0061-qasf-deliver-compressed-asf-streams.patch \
              termux-dns-fix.patch \
              wine-virtual-memory.patch \
-             wine-virtual-memory-39bit-hiarea.patch \
-             wine-box64-compat.patch \
-             wine-box64-noexec.patch; do
+             wine-virtual-memory-39bit-hiarea.patch; do
     case "$_up" in
       wine-virtual-memory*)
         if [ -f /tmp/wine-termux/.skip39bit ]; then
@@ -147,7 +150,44 @@ else
   warning "39-bit VA: 找不到 preloader.c / virtual.c，跳过"
 fi
 
-  # ---- wine-box64-compat.patch 校验（box64/模拟器下的地址空间收敛）----
+  # ---- wine-box64-compat：锚点式幂等注入（不再依赖行号补丁）----
+  # fix_box64_compat.py 从 ci/ 随 workflow 带进来（或从仓库 raw 下载），做三件事：
+  #   1) 补 wine_emulator_detected / wine_emulator_addr_space_limit 定义
+  #   2) 清掉落在 virtual_init() 之外的错位 clamp 块
+  #   3) 把 clamp 插到 virtual_init() 里 get_host_addr_space_limit() 之后
+  if [ -f dlls/ntdll/unix/virtual.c ]; then
+    _b64fix=""
+    for _cand in /tmp/wine-termux/ci/fix_box64_compat.py \
+                 /tmp/wine-termux/fix_box64_compat.py \
+                 /tmp/ci/fix_box64_compat.py \
+                 "${GITHUB_WORKSPACE:-/nonexistent}/ci/fix_box64_compat.py"; do
+      if [ -f "$_cand" ]; then _b64fix="$_cand"; break; fi
+    done
+    if [ -z "$_b64fix" ]; then
+      msg2 "box64-compat: 下载 fix_box64_compat.py"
+      _tmpfix=/tmp/wine-termux/fix_box64_compat.py
+      mkdir -p "$(dirname "$_tmpfix")"
+      if wget -q -O "$_tmpfix" \
+          "https://raw.githubusercontent.com/as14725836/wine-termux/main/ci/fix_box64_compat.py"; then
+        _b64fix="$_tmpfix"
+      fi
+    fi
+    if [ -n "$_b64fix" ] && [ -f "$_b64fix" ]; then
+      msg2 "box64-compat: 运行结构化注入 ($_b64fix)"
+      if python3 "$_b64fix" dlls/ntdll/unix/virtual.c; then
+        msg2 "box64-compat: 注入成功"
+      else
+        echo "!!! FAIL: fix_box64_compat.py 执行失败"
+        exit 1
+      fi
+      # 残留的 .rej / .orig 清掉，避免后续 hard check 误判
+      rm -f dlls/ntdll/unix/virtual.c.rej dlls/ntdll/unix/virtual.c.orig 2>/dev/null || true
+    else
+      echo "!!! FAIL: 找不到 fix_box64_compat.py（ci/ 未同步？）"
+      exit 1
+    fi
+  fi
+  # ---- wine-box64-compat 校验 ----
   if [ -f dlls/ntdll/unix/virtual.c ]; then
     EMD=$(grep -c 'wine_emulator_detected' dlls/ntdll/unix/virtual.c || true)
     EMF=$(grep -c 'wine_emulator_addr_space_limit' dlls/ntdll/unix/virtual.c || true)

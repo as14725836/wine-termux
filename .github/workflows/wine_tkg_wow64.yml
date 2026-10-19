@@ -204,6 +204,15 @@ jobs:
             echo "❌ set-tkg-cfg.sh not found in repository root!"
             exit 1
           fi
+
+          # box64-compat 结构化注入器（替代行号补丁，见 ci/tkg_prepare_hook.sh）
+          if [ -f "$GITHUB_WORKSPACE/ci/fix_box64_compat.py" ]; then
+            sudo mkdir -p /tmp/archlinux/tmp/wine-termux/ci
+            sudo cp "$GITHUB_WORKSPACE/ci/fix_box64_compat.py" /tmp/archlinux/tmp/wine-termux/ci/
+            echo "✅ Copied ci/fix_box64_compat.py"
+          else
+            echo "⚠️ ci/fix_box64_compat.py 未找到（hook 将尝试在线下载）"
+          fi
           
           sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
           
