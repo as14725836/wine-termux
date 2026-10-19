@@ -59,8 +59,18 @@ _termux_path_fix() {
   # Hunk #2 因 fuzz 命中，导致 virtual.c 出现「有调用、无定义」并编译失败；
   # 且 clamp 会漂到 virtual_get_system_info() 而非 virtual_init()。
   # 现改为下方 fix_box64_compat.py 的锚点式幂等注入。
-  for _up in 0060-quartz-implement-colour-filter.patch \
-             0061-qasf-deliver-compressed-asf-streams.patch \
+  # 注意：0060-quartz-implement-colour-filter.patch 已移除。
+  # wine-11.20 上游已自带 Color Space Converter 的完整实现（美式拼写）：
+  #   dlls/quartz/colorconv.c     —— 与补丁的 colour.c 功能等价
+  #   dlls/quartz/main.c:96       —— { &CLSID_Colour, color_create }
+  #   dlls/quartz/quartz_strmif.idl:99 —— coclass Colour { interface IBaseFilter; }
+  # 而补丁是「部分应用」：Makefile.in / quartz_private.h 的 hunk 必 FAILED，
+  # 但 main.c 和 quartz_strmif.idl 的 hunk 会打上，于是：
+  #   1) idl 中出现第二个 coclass Colour → widl 报
+  #      "type Colour already defined at quartz_strmif.idl:99" → quartz 编译失败；
+  #   2) main.c 中重复注册 CLSID_Colour。
+  # 该补丁已过时，直接跳过（功能由上游提供）。
+  for _up in 0061-qasf-deliver-compressed-asf-streams.patch \
              termux-dns-fix.patch \
              wine-virtual-memory.patch \
              wine-virtual-memory-39bit-hiarea.patch; do
