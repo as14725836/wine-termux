@@ -320,8 +320,11 @@ jobs:
             _fam="${_bad%-*.patch}"          # 去掉 -<commit>.patch，得到家族名
             echo "⚠️ 补丁打不上: ${_bad} (家族: ${_fam})"
             # ---- 白名单：只剔除已知对版本基线敏感的补丁，核心补丁一律不删 ----
+            # 注意：_fam 是 ${_bad%-*.patch} 的产物，会把 "-wow64.patch" 也当成 commit 后缀剥掉，
+            # 所以 LAA-unix-staging-wow64.patch 的家族名实际是 "LAA-unix-staging"。
             case "${_fam}" in
-              LAA-unix-staging-wow64) ;;
+              LAA-unix-staging*|LAA-unix-staging-wow64)
+                echo "ℹ️ 家族 ${_fam} 在白名单内，剔除后重试" ;;
               *)
                 echo "❌ 失败补丁家族 ${_fam} 不在白名单，拒绝删除（避免破坏构建）"
                 exit 1 ;;
