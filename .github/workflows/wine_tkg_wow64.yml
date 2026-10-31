@@ -192,7 +192,7 @@ jobs:
           fi
           if [ -n "$_src" ]; then
             # 自定义源：set-tkg-cfg.sh 会强制 _use_staging=false，这里如实反映
-            staging_state="off(custom-src)"
+            staging_state="off"
           elif [[ "${{ github.event.inputs.no_staging }}" == "true" ]]; then
             staging_state="off"
           else
@@ -540,7 +540,6 @@ jobs:
             echo "package name   : ${{ steps.wine_tag.outputs.PKG_NAME }}"
             echo "variant        : ${{ steps.wine_tag.outputs.VARIANT }}"
             echo "staging        : ${{ steps.wine_tag.outputs.STAGING }}"
-            echo "staging (real)  : $( [ -n "${{ steps.wine_tag.outputs.wine_source }}" ] && echo off || echo ${{ steps.wine_tag.outputs.STAGING }} )"
             echo "39-bit patch   : ${{ steps.wine_tag.outputs.PATCH39 }}"
             echo "enable_mf      : ${{ steps.wine-mirror.outputs.enable_mf || 'false' }}"
             echo "enable_esync   : ${{ steps.wine_tag.outputs.enable_esync }}"
