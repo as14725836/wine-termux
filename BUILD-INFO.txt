@@ -1,0 +1,19 @@
+wine source    : https://dawn.wine/dawn-winery/wine-dwproton.git
+source ref     : dwproton/11.0-16
+wine tag       : wine-11.0
+package name   : dxgi-dwproton
+variant        : default
+staging        : off
+39-bit patch   : applied
+enable_mf      : false
+enable_esync   : false
+workflow sha   : 365c7b1dcf577b58fd6b585973d995c247d0e8c7
+run            : #119 (id 41216377118)
+built at (UTC) : 2026-10-31T16:34:19Z
+
+-- 源码树校验 --
+virtual.c 0x7fffff0000           : 5
+virtual.c 0x7ffe000000           : 1
+virtual.c wine_emulator_detected : 3
+virtual.c box64/emu compat       : 1
+seccomp NATIVE_SYSCALL_ADDRESS_START : 
