@@ -76,6 +76,14 @@ jobs:
           CUSTOM_TAG: ${{ github.event.inputs.tag }}
           ENABLE_MF: ${{ github.event.inputs.enable_mf || 'false' }}
         run: |
+          # ---- 自定义 Wine 源：不查 wine-mirror（与本仓库无关）----
+          if [ "${{ github.event.inputs.use_dwproton }}" = "true" ] \
+            || [ -n "${{ github.event.inputs.wine_source }}" ]; then
+            echo "custom wine source -> skip wine-mirror lookup"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "enable_mf=$ENABLE_MF" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "$CUSTOM_TAG" ]; then
             echo "Use custom tag from manual dispatch: $CUSTOM_TAG"
             latest_tag="$CUSTOM_TAG"
@@ -93,7 +101,7 @@ jobs:
             echo "❌ Failed to get latest Wine tag!"
             exit 1
           fi
-          echo "Latest Wine tag: $latest_tag"
+          echo "Latest upstream Wine tag: $latest_tag (naming only; source comes from wine-mirror)"
           echo "$latest_tag" > .wine_current_tag
           echo "tag=$latest_tag" >> "$GITHUB_OUTPUT"
           echo "enable_mf=$ENABLE_MF" >> "$GITHUB_OUTPUT"
@@ -147,8 +155,29 @@ jobs:
             echo "wine_source_ref=$_ref"
             echo "wine_src_dir=$_srcdir"
           } >> "$GITHUB_OUTPUT"
+          # ---- 版本号来源 --------------------------------------------------
+          # 上游源：用 wine-mirror 最新 tag（如 wine-11.21）——它是真实版本。
+          # 自定义源：那个 tag 与本仓库无关，必须改用 source_ref 自身版本。
+          # 例：dwproton/11.0-16 -> 11.0；wine-11.0 -> 11.0；dwproton-11.0-14 -> 11.0
           wine_tag="${{ steps.wine-mirror.outputs.tag }}"
           wine_ver="${wine_tag#wine-}"
+          if [ -n "$_src" ]; then
+            _refver="$_ref"
+            if [ -z "$_refver" ]; then
+              # 未指定 ref：取远端默认分支名兜底（下面不阻塞构建，仅命名）
+              _refver=$(git ls-remote --symref "$_src" HEAD 2>/dev/null \
+                | sed -n 's|^ref: refs/heads/||p' | head -1)
+            fi
+            _refver=$(printf '%s' "$_refver" \
+              | grep -oE '[0-9]+\.[0-9]+' | head -1)
+            if [ -n "$_refver" ]; then
+              wine_ver="$_refver"
+              wine_tag="wine-${_refver}"
+            else
+              echo "WARN: 无法从 source_ref 解析版本号，回退上游 tag（$wine_tag）"
+            fi
+            echo "custom source version: wine_ver=$wine_ver (ref=$_ref)"
+          fi
           pkg_name="dxgi"
           if [[ "${{ steps.wine-mirror.outputs.enable_mf }}" == "true" ]]; then
             pkg_name="mf"
@@ -161,7 +190,10 @@ jobs:
           if [[ "${{ github.event.inputs.skip_39bit }}" == "true" ]]; then
             variant="${variant:+${variant}-}no39bit"
           fi
-          if [[ "${{ github.event.inputs.no_staging }}" == "true" ]]; then
+          if [ -n "$_src" ]; then
+            # 自定义源：set-tkg-cfg.sh 会强制 _use_staging=false，这里如实反映
+            staging_state="off(custom-src)"
+          elif [[ "${{ github.event.inputs.no_staging }}" == "true" ]]; then
             staging_state="off"
           else
             staging_state="on"
@@ -508,6 +540,7 @@ jobs:
             echo "package name   : ${{ steps.wine_tag.outputs.PKG_NAME }}"
             echo "variant        : ${{ steps.wine_tag.outputs.VARIANT }}"
             echo "staging        : ${{ steps.wine_tag.outputs.STAGING }}"
+            echo "staging (real)  : $( [ -n "${{ steps.wine_tag.outputs.wine_source }}" ] && echo off || echo ${{ steps.wine_tag.outputs.STAGING }} )"
             echo "39-bit patch   : ${{ steps.wine_tag.outputs.PATCH39 }}"
             echo "enable_mf      : ${{ steps.wine-mirror.outputs.enable_mf || 'false' }}"
             echo "enable_esync   : ${{ steps.wine_tag.outputs.enable_esync }}"
