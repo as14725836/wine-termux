@@ -216,17 +216,6 @@ jobs:
             exit 1
           fi
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
-          # ---- 自定义 Wine 源：关闭 tools/make_makefiles ----------------
-          # TkG 无条件执行 tools/make_makefiles，该脚本要求每个 *.idl 都带
-          # "#pragma makedep" 标志，否则直接 die：
-          #   no makedep flags specified in dlls/amd_ags_x64/dxvk_interfaces.idl
-          # dwproton 这类 fork 的 idl 不走 widl 生成路径（TkG 对 *ValveSoftware*
-          # 源已有同样例外）。故把跳过条件扩到任意自定义源。
-          if [ -n "${{ steps.wine_tag.outputs.wine_source }}" ] \
-            && [ -f "$GITHUB_WORKSPACE/ci/tkg_skip_makemakefiles.py" ]; then
-            python3 "$GITHUB_WORKSPACE/ci/tkg_skip_makemakefiles.py" \
-              "/tmp/archlinux/tmp/wine-tkg-git" || echo "WARN: make_makefiles guard"
-          fi
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
           echo "Creating /tmp/wine-termux directory with required scripts..."
           sudo mkdir -p /tmp/archlinux/tmp/wine-termux
@@ -344,6 +333,41 @@ jobs:
           grep -n "_termux_path_fix" "$PREPARE_SH" || { echo "❌ Hook function missing"; exit 1; }
           # ===================== Termux 路径修复 hook 结束 =====================
 
+          # ---- 自定义 Wine 源：关闭 tools/make_makefiles ----------------
+          # tools/make_makefiles 要求每个 *.idl 带 "#pragma makedep"，否则 die：
+          #   no makedep flags specified in dlls/amd_ags_x64/dxvk_interfaces.idl
+          # dwproton 这类 fork 的 idl 不走 widl（TkG 对 *ValveSoftware* 已有同样例外），
+          # 故把跳过条件扩到任意自定义源。mk_skip_makefiles.py 幂等，重复执行无副作用。
+          cat > /tmp/wine-tkg-git/mk_skip_makefiles.py <<'PYEOF'
+          import os, sys
+          MARKER = "termux_skip_makemakefiles"
+          OLD = ('if [[ "$_custom_wine_source" != *"ValveSoftware"* ]]; then\n'
+                 '\t  git add * && true\n'
+                 '\t  tools/make_makefiles\n'
+                 '\tfi')
+          NEW = ('# ' + MARKER + ': skip make_makefiles for custom source\n'
+                 'if [[ "$_custom_wine_source" != *"ValveSoftware"* ]] && [ -z "$_custom_wine_source" ]; then\n'
+                 '\t  git add * && true\n'
+                 '\t  tools/make_makefiles\n'
+                 '\tfi')
+          path = os.path.join(sys.argv[1], "wine-tkg-scripts", "prepare.sh")
+          if not os.path.isfile(path):
+              print("[skip-mk] prepare.sh not found -> skip")
+              sys.exit(0)
+          src = open(path, encoding="utf-8").read()
+          if MARKER in src:
+              print("[skip-mk] already applied")
+              sys.exit(0)
+          if OLD not in src:
+              print("[skip-mk] WARN: block not matched")
+              sys.exit(0)
+          open(path, "w", encoding="utf-8").write(src.replace(OLD, NEW, 1))
+          print("[skip-mk] OK: make_makefiles disabled for custom source")
+          PYEOF
+          if [ -n "${{ steps.wine_tag.outputs.wine_source }}" ]; then
+            python3 /tmp/wine-tkg-git/mk_skip_makefiles.py /tmp/wine-tkg-git \
+              || echo "WARN: make_makefiles guard"
+          fi
           chmod +x ./non-makepkg-build.sh
           # ---- TkG 的 userpatch 失败是硬 abort（如 LAA-unix-staging-wow64-<commit>.patch 只适配特定 staging 基线）。
           #      改成：打不上的补丁自动剔除后重试，最多 9 次。_prepare 只是 clone+打补丁，重试很快。
