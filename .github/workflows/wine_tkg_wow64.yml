@@ -39,6 +39,19 @@ on:
         description: "产物后缀（如 no39bit），体现在 Release tag / 源码分支名，避免覆盖现有包"
         required: false
         type: string
+      wine_source:
+        description: "Wine 源码仓库（留空=上游 wine-mirror；可填 https://dawn.wine/dawn-winery/wine-dwproton.git）"
+        required: false
+        type: string
+      wine_source_ref:
+        description: "自定义源的分支/tag/commit（如 dwproton/11.0-16；留空=远端默认分支）"
+        required: false
+        type: string
+      use_dwproton:
+        description: "一键启用 dawn-wine dwproton 构建源（等效 wine_source=https://dawn.wine/dawn-winery/wine-dwproton.git）"
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "0 1 * * *"
 
@@ -116,6 +129,24 @@ jobs:
         if: steps.need_build.outputs.new_release == 'true'
         id: wine_tag
         run: |
+          # ---- 自定义 Wine 源解析（dwproton 等 wine fork）----
+          _src="${{ github.event.inputs.wine_source }}"
+          _ref="${{ github.event.inputs.wine_source_ref }}"
+          if [ "${{ github.event.inputs.use_dwproton }}" = "true" ] && [ -z "$_src" ]; then
+            _src="https://dawn.wine/dawn-winery/wine-dwproton.git"
+            [ -n "$_ref" ] || _ref="dwproton/11.0-16"
+          fi
+          # TkG _winesrcdir 派生：去 scheme+host，把 / 和 . 全换成 -
+          _srcdir="wine-git"
+          if [ -n "$_src" ]; then
+            _srcdir=$(printf '%s' "${_src//./}" | sed 's|.*://.[^/]*/||' | sed 's|/|-|g')
+          fi
+          echo "WINE_SOURCE=[$_src]  REF=[$_ref]  SRCDIR=[$_srcdir]"
+          {
+            echo "wine_source=$_src"
+            echo "wine_source_ref=$_ref"
+            echo "wine_src_dir=$_srcdir"
+          } >> "$GITHUB_OUTPUT"
           wine_tag="${{ steps.wine-mirror.outputs.tag }}"
           wine_ver="${wine_tag#wine-}"
           pkg_name="dxgi"
@@ -240,7 +271,8 @@ jobs:
           export ENABLE_ESYNC=${{ steps.wine_tag.outputs.enable_esync }}
           cd /tmp/wine-tkg-git/wine-tkg-git/
           bash -x /tmp/wine-termux/patch.sh wine-tkg-auto "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git/wine-tkg-userpatches || exit 1
-          bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git || exit 1
+          bash -x /tmp/wine-termux/set-tkg-cfg.sh "${{ steps.wine_tag.outputs.wine_tag }}" /tmp/wine-tkg-git/wine-tkg-git \
+            "${{ steps.wine_tag.outputs.wine_source }}" "${{ steps.wine_tag.outputs.wine_source_ref }}" || exit 1
           if [ "$ENABLE_ESYNC" = "false" ]; then
             echo "⚠️ esync 已手动禁用，将关闭 _use_esync"
             sed -i 's/^_use_esync=.*/_use_esync="false"/' customization.cfg
@@ -419,19 +451,24 @@ jobs:
       - name: Upload Source to wine-termux
         if: steps.need_build.outputs.new_release == 'true'
         run: |
-          src_dir="/tmp/archlinux/tmp/wine-tkg/src/wine-git"
+          src_name="${{ steps.wine_tag.outputs.wine_src_dir }}"
+          [ -n "$src_name" ] || src_name="wine-git"
+          src_dir="/tmp/archlinux/tmp/wine-tkg/src/${src_name}"
+          echo "Source dir: $src_dir"
           if [ ! -d "$src_dir" ]; then
             echo "❌ Source directory not found: $src_dir"
             exit 1
           fi
-          sudo chown -R $USER:$USER /tmp/archlinux/tmp/wine-tkg/src/wine-git
-          cd /tmp/archlinux/tmp/wine-tkg/src/wine-git/
+          sudo chown -R $USER:$USER "$src_dir"
+          cd "$src_dir"/
           sudo cp -r -p /tmp/archlinux/tmp/output/*/share/wine/wine-tkg-config.txt .
           sudo chmod 644 wine-tkg-config.txt
           sudo rm -rf .git
           cd "$src_dir"
           # ---- 写自描述构建信息（源码分支根目录，便于区分不同配置的包）----
           {
+            echo "wine source    : ${{ steps.wine_tag.outputs.wine_source || 'upstream wine-mirror' }}"
+            echo "source ref     : ${{ steps.wine_tag.outputs.wine_source_ref || '(default)' }}"
             echo "wine tag       : ${{ steps.wine_tag.outputs.wine_tag }}"
             echo "package name   : ${{ steps.wine_tag.outputs.PKG_NAME }}"
             echo "variant        : ${{ steps.wine_tag.outputs.VARIANT }}"
