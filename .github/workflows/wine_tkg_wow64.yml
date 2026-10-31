@@ -80,7 +80,11 @@ jobs:
           if [ "${{ github.event.inputs.use_dwproton }}" = "true" ] \
             || [ -n "${{ github.event.inputs.wine_source }}" ]; then
             echo "custom wine source -> skip wine-mirror lookup"
-            echo "tag=" >> "$GITHUB_OUTPUT"
+            _ref="${{ github.event.inputs.wine_source_ref }}"
+            _cached="custom"
+            if [ -n "$_ref" ]; then _cached="dwproton-$(printf %s "$_ref" | tr / -)"; fi
+            echo "$_cached" > .wine_current_tag
+            echo "tag=$_cached" >> "$GITHUB_OUTPUT"
             echo "enable_mf=$ENABLE_MF" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -597,7 +601,7 @@ jobs:
       - name: Save current tag to cache file
         if: steps.need_build.outputs.new_release == 'true'
         run: |
-          cp .wine_current_tag .wine_last_tag
+          if [ -f .wine_current_tag ]; then cp .wine_current_tag .wine_last_tag; else echo "WARN: no .wine_current_tag, skip"; fi
       - name: Update tag cache
         if: steps.need_build.outputs.new_release == 'true'
         uses: actions/cache@v4
