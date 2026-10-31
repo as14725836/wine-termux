@@ -64,11 +64,25 @@ if [ -n "$_WINE_SOURCE" ]; then
   sed -i "s|^_custom_wine_source=.*|_custom_wine_source=\"${_WINE_SOURCE}\"|" "$file_path2" || exit 1
   grep -q '^_custom_wine_source=' "$file_path2" || echo "_custom_wine_source=\"${_WINE_SOURCE}\"" >> "$file_path2"
   # 自定义源没有 staging 基线：强制关闭，否则 _prepare 会把 HEAD 回退到上游 commit
-  file_path2="$file_path/customization.cfg"
-  sed2 _use_staging false
-  sed2 _staging_version ""
+  _cust_cfg="$file_path/customization.cfg"
+  file_path2="$_cust_cfg" && sed2 _use_staging false
+  file_path2="$_cust_cfg" && sed2 _staging_version ""
+
+  # TkG 的 wine 补丁集（frogminer）对 wine-mirror/wine-staging 的 commit 图强绑定，
+  # 自定义源（如 dwproton 独立分支）上 git merge-base 判定必然错配：
+  #   - LAA（proton/LAA）会挑到不适配的 LAA-unix-wow64-<sha>.patch -> 打不上直接 abort
+  #   - enable_dynamic_wow64_def.patch 同样按上游 commit 区间判定
+  # 另外上游注释明确写着 _large_address_aware 与 WoW64 实验模式不兼容，
+  # 而本构建 _NOLIB32=wow64。故一并关闭。
+  file_path2="$file_path/wine-tkg-profiles/advanced-customization.cfg"
+  sed2 _large_address_aware false
+  if [ -f "$file_path2" ]; then
+    sed -i 's|^_unfrog=.*|_unfrog="true"|' "$file_path2" || exit 1
+    grep -q '^_unfrog=' "$file_path2" || echo '_unfrog="true"' >> "$file_path2"
+  fi
+  echo "disabled _large_address_aware and (via _unfrog) enable_dynamic_wow64_def for custom source"
   if [ -n "$_SOURCE_REF" ]; then
-    sed2 _plain_version "$_SOURCE_REF"
+    file_path2="$_cust_cfg" && sed2 _plain_version "$_SOURCE_REF"
   fi
   echo "✅ _custom_wine_source 已写入，_use_staging=false"
 fi
@@ -97,7 +111,7 @@ sed2 _nomakepkg_prefix_path /tmp/output
 
 if [ "$NO_STAGING" = "true" ]; then
   echo "NO_STAGING: 关闭 staging（对照构建：对齐纯净 wine）"
-  sed2 _use_staging false
+  file_path2="$_cust_cfg" && sed2 _use_staging false
 fi
 
 file_path2="$file_path/wine-tkg-profiles/advanced-customization.cfg"
