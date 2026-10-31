@@ -216,6 +216,17 @@ jobs:
             exit 1
           fi
           sudo mv "$GITHUB_WORKSPACE/wine-tkg-git" archlinux/tmp/
+          # ---- 自定义 Wine 源：关闭 tools/make_makefiles ----------------
+          # TkG 无条件执行 tools/make_makefiles，该脚本要求每个 *.idl 都带
+          # "#pragma makedep" 标志，否则直接 die：
+          #   no makedep flags specified in dlls/amd_ags_x64/dxvk_interfaces.idl
+          # dwproton 这类 fork 的 idl 不走 widl 生成路径（TkG 对 *ValveSoftware*
+          # 源已有同样例外）。故把跳过条件扩到任意自定义源。
+          if [ -n "${{ steps.wine_tag.outputs.wine_source }}" ] \
+            && [ -f "$GITHUB_WORKSPACE/ci/tkg_skip_makemakefiles.py" ]; then
+            python3 "$GITHUB_WORKSPACE/ci/tkg_skip_makemakefiles.py" \
+              "/tmp/archlinux/tmp/wine-tkg-git" || echo "WARN: make_makefiles guard"
+          fi
           sudo cp -r -p "$GITHUB_WORKSPACE/"* archlinux/tmp/
           echo "Creating /tmp/wine-termux directory with required scripts..."
           sudo mkdir -p /tmp/archlinux/tmp/wine-termux
