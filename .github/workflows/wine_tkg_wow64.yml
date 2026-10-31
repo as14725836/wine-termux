@@ -365,7 +365,7 @@ jobs:
           print("[skip-mk] OK: make_makefiles disabled for custom source")
           PYEOF
           if [ -n "${{ steps.wine_tag.outputs.wine_source }}" ]; then
-            python3 /tmp/wine-tkg-git/mk_skip_makefiles.py /tmp/wine-tkg-git \
+            python3 /tmp/wine-tkg-git/mk_skip_makefiles.py /tmp/wine-tkg-git/wine-tkg-git \
               || echo "WARN: make_makefiles guard"
           fi
           chmod +x ./non-makepkg-build.sh
