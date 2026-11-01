@@ -1,0 +1,6 @@
+UNIXLIB   = winepulse.so
+UNIX_LIBS    = $(PULSE_LIBS) $(PTHREAD_LIBS) $(UDEV_LIBS) -lm
+UNIX_CFLAGS  = $(PULSE_CFLAGS) $(UDEV_CFLAGS)
+
+SOURCES = \
+	pulse.c
