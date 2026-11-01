@@ -1067,15 +1067,44 @@ jobs:
           find "$PREFIX" -type f \( -name '*.debug' -o -name '*.dwo' \) -delete 2>/dev/null || true
           rm -rf "$PREFIX/include" "$PREFIX/share/man" "$PREFIX/share/doc" 2>/dev/null || true
 
-          # Termux runtime path（可选；仅当目标为 termux）
+          # ---- 修复 bin/ 下的断链 ----
+          # 多架构交叉构建（--enable-archs="arm64ec,aarch64,i386"）时，wine 主程序
+          # 被安装到 lib/wine/<host>-unix/wine，而 make install 仍在 bin/ 下创建
+          # wineboot/regedit/... -> wine 的相对符号链接。由于 bin/wine 本身没有生成，
+          # 这些链接全部悬空（ls 显示 0 字节）。这里补建 bin/wine 使其恢复。
           if [ -d "$PREFIX/bin" ]; then
-            for b in "$PREFIX"/bin/wine*; do
-              [ -f "$b" ] || continue
-              case "$(file -b "$b" 2>/dev/null)" in
-                *ELF*aarch64*) : ;;
-                *) continue ;;
-              esac
-            done || true
+            HOST_TRIPLE=$(uname -m)
+            WINE_SUBDIR="${HOST_TRIPLE}-unix"
+            WINE_MAIN="$PREFIX/lib/wine/$WINE_SUBDIR/wine"
+            if [ ! -x "$WINE_MAIN" ]; then
+              for cand in aarch64-unix arm64-unix; do
+                if [ -x "$PREFIX/lib/wine/$cand/wine" ]; then
+                  WINE_SUBDIR="$cand"; WINE_MAIN="$PREFIX/lib/wine/$cand/wine"; break
+                fi
+              done
+            fi
+            if [ -x "$WINE_MAIN" ]; then
+              if [ ! -e "$PREFIX/bin/wine" ]; then
+                ln -sf "../lib/wine/$WINE_SUBDIR/wine" "$PREFIX/bin/wine"
+                echo "✅ 修复 bin/wine -> ../lib/wine/$WINE_SUBDIR/wine"
+              else
+                echo "ℹ️ bin/wine 已存在，跳过创建"
+              fi
+            else
+              echo "⚠️ 未找到 lib/wine/*-unix/wine，无法修复 bin/wine"
+            fi
+            BROKEN=0
+            for b in "$PREFIX"/bin/*; do
+              [ -L "$b" ] || continue
+              if [ ! -e "$b" ]; then
+                echo "⚠️ 断链: $(basename "$b") -> $(readlink "$b")"
+                BROKEN=$((BROKEN+1))
+              fi
+            done
+            echo "bin 断链数量: $BROKEN"
+            if [ "$BROKEN" -gt 0 ]; then
+              echo "⚠️ 仍有断链，产物可能不完整"
+            fi
           fi
 
           rm -rf /tmp/pkg
