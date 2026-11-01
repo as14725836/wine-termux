@@ -209,6 +209,7 @@ jobs:
           BUILD_FEX="@@BUILD_FEX@@"
           FEX_REPO="@@FEX_REPO@@"
           FEX_REF="@@FEX_REF@@"
+          TERMUX_GLIBC_PREFIX="@@TERMUX_GLIBC_PREFIX@@"
 
           WS=/tmp/wt-scripts
           SRC=/opt/wine-src
@@ -1119,6 +1120,22 @@ jobs:
           # 该库的 NEEDED 是 libc.so（bionic 写法，无版本号），在 glibc 环境里
           # 会强制 ld.so 去解析 ld script 而崩溃。这里把它从产物里排除掉
           # （运行时由 glibc-runner / xmobox 负责清理环境）。
+          # 守卫：chroot 不继承环境变量，若注入失败会退化成 "/lib" 等错误路径，
+          # 产物在 Termux 上就找不到 libc.so.6。这里直接判空并中止。
+          if [ -z "${TERMUX_GLIBC_PREFIX:-}" ]; then
+            echo "❌ TERMUX_GLIBC_PREFIX 为空（模板注入失败），中止打包"
+            exit 1
+          fi
+          case "$TERMUX_GLIBC_PREFIX" in
+            /data/data/com.termux/files/usr/glibc) ;;
+            *)
+              echo "❌ TERMUX_GLIBC_PREFIX 取值异常: '$TERMUX_GLIBC_PREFIX'"
+              echo "   期望 /data/data/com.termux/files/usr/glibc"
+              exit 1
+              ;;
+          esac
+          echo "TERMUX_GLIBC_PREFIX = $TERMUX_GLIBC_PREFIX"
+
           TERMUX_LOADER="${TERMUX_GLIBC_PREFIX}/lib/ld-linux-aarch64.so.1"
           if pacman -S --noconfirm --needed patchelf >/dev/null 2>&1 || command -v patchelf >/dev/null 2>&1; then
             echo "===== patchelf: 写入 Termux interpreter + RUNPATH ====="
@@ -1256,6 +1273,7 @@ jobs:
           IN_BUILD_FEX: ${{ inputs.build_fex || 'true' }}
           IN_FEX_REPO: ${{ inputs.fex_repo || 'AndreRH/FEX' }}
           IN_FEX_REF: ${{ inputs.fex_ref || 'arm64ec' }}
+          IN_TERMUX_GLIBC_PREFIX: ${{ env.TERMUX_GLIBC_PREFIX }}
         run: |
           set -e
           python3 - "$GITHUB_WORKSPACE" <<'PYGEN'
@@ -1279,6 +1297,7 @@ jobs:
               "@@BUILD_FEX@@": os.environ["IN_BUILD_FEX"],
               "@@FEX_REPO@@": os.environ["IN_FEX_REPO"],
               "@@FEX_REF@@": os.environ["IN_FEX_REF"],
+              "@@TERMUX_GLIBC_PREFIX@@": os.environ["IN_TERMUX_GLIBC_PREFIX"],
           }
           tpl = open("/tmp/arm64-build.sh.tpl").read()
           for k, v in m.items():
