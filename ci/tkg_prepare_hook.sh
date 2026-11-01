@@ -329,6 +329,41 @@ fi
   fi
   # ---- mfplat CLSID 兜底 end ----
 
+
+  # ====================================================================
+  # box64 / ARM64 wow64 修复补丁（移植自 termux-glibc-mangohud）
+  # ====================================================================
+  # 背景：dwproton 是 x86_64 Wine，在 aarch64 宿主上靠 box64 翻译运行。
+  # 三个病灶叠加会让 prefix 初始化后 syswow64/ 为空，进而出现
+  #   wine: could not load kernel32.dll, status c0000135
+  # 每个补丁都是幂等的，找不到锚点只 WARN 不中断构建。
+  _wow64_patch_dir=""
+  for _c in "${GITHUB_WORKSPACE}/ci/patches/wow64" "/tmp/wine-termux/ci/patches/wow64" "/tmp/ci/patches/wow64"; do
+    if [ -d "$_c" ]; then _wow64_patch_dir="$_c"; break; fi
+  done
+
+  if [ -n "$_wow64_patch_dir" ]; then
+    msg2 "wow64 fixes: patch dir = $_wow64_patch_dir"
+    for _p in \
+      inject_disable_epoll_pwait2.py \
+      inject_preloader_wow64_guard.py \
+      inject_wineboot_wow64_decouple.py ; do
+      if [ -f "$_wow64_patch_dir/$_p" ]; then
+        msg2 "wow64 fixes: running $_p"
+        python3 "$_wow64_patch_dir/$_p" . || warning "wow64 fixes: $_p failed, continuing"
+      else
+        warning "wow64 fixes: $_p not found in $_wow64_patch_dir"
+      fi
+    done
+    # 校验：三个 SENTINEL 是否都落地
+    msg2 "wow64 fixes self-check:"
+    msg2 "  epoll_pwait2 disabled : $(grep -c 'NO_EPOLL_PWAIT2_FOR_TERMUX' server/fd.c 2>/dev/null || echo 0)"
+    msg2 "  hostguard injected   : $(grep -c 'TERMUX_WOW64_HOSTGUARD' dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
+    msg2 "  wineboot decoupled   : $(grep -c 'TERMUX_WINEBOOT_WOW64_DECOUPLE' programs/wineboot/wineboot.c 2>/dev/null || echo 0)"
+  else
+    warning "wow64 fixes: patch dir not found, skipped"
+  fi
+  # ---- box64/ARM64 wow64 修复补丁 end ----
   popd &>/dev/null
   msg2 "Termux path fix done"
 }
