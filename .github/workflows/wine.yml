@@ -1109,6 +1109,71 @@ jobs:
           fi
 
 
+          # ---- 修复 NLS 断链 ----
+          # make install 对 nls/*.nls 用的是 `ln -s` 指向构建机源码目录
+          # （/opt/wine-src/source/nls/xxx.nls），该路径在用户设备上不存在。
+          # 结果 lib/wine/nls 与 share/wine/nls 下 152 个 .nls 全部悬空，
+          # wineserver 启动时读不到 l_intl.nls 直接 abort，wineboot 无法初始化：
+          #   wineserver: failed to load l_intl.nls
+          #   wine client error:0: recvmsg: Connection reset by peer
+          # 这里把断链换成真实文件（源码树里就是真文件）。
+          NLS_SRC_CAND=""
+          for d in "$SRC/source/nls" "$SRC/nls" /opt/wine-src/source/nls; do
+            if [ -f "$d/locale.nls" ]; then NLS_SRC_CAND="$d"; break; fi
+          done
+
+          if [ -n "$NLS_SRC_CAND" ]; then
+            NLS_FIXED=0
+            for d in "$PREFIX/lib/wine/nls" "$PREFIX/share/wine/nls"; do
+              [ -d "$d" ] || continue
+              for f in "$d"/*.nls; do
+                [ -L "$f" ] || continue
+                [ -e "$f" ] && continue
+                b=$(basename "$f")
+                if [ -f "$NLS_SRC_CAND/$b" ]; then
+                  rm -f "$f"
+                  cp -f "$NLS_SRC_CAND/$b" "$f"
+                  NLS_FIXED=$((NLS_FIXED+1))
+                fi
+              done
+            done
+            echo "NLS 断链修复: $NLS_FIXED 个 (源: $NLS_SRC_CAND)"
+          else
+            echo "⚠️ 未找到 NLS 源目录，尝试从其他位置回填"
+          fi
+
+          # 兜底：lib/wine/nls 与 share/wine/nls 互补（任一为真文件即可）
+          for f in "$PREFIX/lib/wine/nls"/*.nls; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            t="$PREFIX/share/wine/nls/$b"
+            if [ -L "$t" ] && [ ! -e "$t" ]; then
+              rm -f "$t"; cp -f "$f" "$t"
+            fi
+          done
+          for f in "$PREFIX/share/wine/nls"/*.nls; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            t="$PREFIX/lib/wine/nls/$b"
+            if [ -L "$t" ] && [ ! -e "$t" ]; then
+              rm -f "$t"; cp -f "$f" "$t"
+            fi
+          done
+
+          # 校验：不允许还有悬空的 .nls
+          NLS_BROKEN=0
+          for f in "$PREFIX"/lib/wine/nls/*.nls "$PREFIX"/share/wine/nls/*.nls; do
+            [ -L "$f" ] || continue
+            [ -e "$f" ] || NLS_BROKEN=$((NLS_BROKEN+1))
+          done
+          echo "NLS 悬空链接剩余: $NLS_BROKEN"
+          if [ "$NLS_BROKEN" -gt 0 ]; then
+            echo "❌ NLS 仍有 $NLS_BROKEN 个断链，wineboot 将无法初始化"
+            exit 1
+          fi
+          echo "✅ NLS 完备"
+          # ---- NLS 修复 end ----
+
           # ---- Termux runtime path 修复（patchelf）----
           # 关键：宿主交叉编译出来的 ELF 默认 interpreter 是 /lib/ld-linux-aarch64.so.1，
           # 且没有 RUNPATH。放到 Termux 的 glibc 环境里运行时，ld.so 找不到 libc.so.6，
