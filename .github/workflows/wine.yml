@@ -1107,6 +1107,95 @@ jobs:
             fi
           fi
 
+
+          # ---- Termux runtime path 修复（patchelf）----
+          # 关键：宿主交叉编译出来的 ELF 默认 interpreter 是 /lib/ld-linux-aarch64.so.1，
+          # 且没有 RUNPATH。放到 Termux 的 glibc 环境里运行时，ld.so 找不到 libc.so.6，
+          # 只能回落到 Android linker，撞上 glibc/lib/libc.so 这个 GNU ld script，
+          # 报 "invalid ELF header"。mangohud 的 wine.yml 第 19 步做的正是这件事。
+          #
+          # 另外：Termux 的 sshd 会话会预设
+          #   LD_PRELOAD=/data/data/com.termux/files/usr/lib/libtermux-exec-ld-preload.so
+          # 该库的 NEEDED 是 libc.so（bionic 写法，无版本号），在 glibc 环境里
+          # 会强制 ld.so 去解析 ld script 而崩溃。这里把它从产物里排除掉
+          # （运行时由 glibc-runner / xmobox 负责清理环境）。
+          TERMUX_LOADER="${TERMUX_GLIBC_PREFIX}/lib/ld-linux-aarch64.so.1"
+          if pacman -S --noconfirm --needed patchelf >/dev/null 2>&1 || command -v patchelf >/dev/null 2>&1; then
+            echo "===== patchelf: 写入 Termux interpreter + RUNPATH ====="
+            PATCH_FAIL=0
+
+            _patch_one() {
+              _f="$1"
+              case "$(file -b "$_f" 2>/dev/null)" in
+                *"ELF 64-bit"*"ARM aarch64"*) ;;
+                *) return 0 ;;
+              esac
+              if readelf -lW "$_f" 2>/dev/null | grep -q 'program interpreter'; then
+                patchelf --set-interpreter "$TERMUX_LOADER" \
+                         --set-rpath "$TERMUX_GLIBC_PREFIX/lib" "$_f" 2>/dev/null || PATCH_FAIL=$((PATCH_FAIL+1))
+              else
+                patchelf --set-rpath "$TERMUX_GLIBC_PREFIX/lib" "$_f" 2>/dev/null || PATCH_FAIL=$((PATCH_FAIL+1))
+              fi
+            }
+
+            # bin/ 下所有 ELF（含 wineserver）
+            for f in "$PREFIX"/bin/*; do
+              [ -f "$f" ] || continue
+              _patch_one "$f"
+            done
+            echo "  bin/ 处理完毕"
+
+            # lib/wine 下所有 ELF
+            N_LIB=0
+            while IFS= read -r -d '' f; do
+              _patch_one "$f"
+              N_LIB=$((N_LIB+1))
+            done < <(find "$PREFIX/lib/wine" -type f -print0 2>/dev/null)
+            echo "  lib/wine 扫描 $N_LIB 个文件"
+
+            echo "  patchelf 失败数: $PATCH_FAIL"
+
+            # ---- 自检 ----
+            echo "===== runtime path 自检 ====="
+            CHK_FAIL=0
+            for ELF in "$PREFIX/bin/wine" "$PREFIX/bin/wineserver" "$PREFIX"/lib/wine/*-unix/wine; do
+              [ -f "$ELF" ] || continue
+              I="$(readelf -lW "$ELF" 2>/dev/null | sed -n 's/.*program interpreter: \(.*\)\]/\1/p' | head -1)"
+              R="$(readelf -dW "$ELF" 2>/dev/null | sed -n 's/.*RUNPATH.*\[\(.*\)\]/\1/p' | head -1)"
+              echo "  $(basename "$(dirname "$ELF")")/$(basename "$ELF")"
+              echo "      interp = ${I:-<none>}"
+              echo "      rpath  = ${R:-<none>}"
+              if [ -n "$I" ] && [ "$I" != "$TERMUX_LOADER" ]; then
+                echo "      !! interpreter 不是 Termux loader"
+                CHK_FAIL=1
+              fi
+              case "$R" in
+                *"$TERMUX_GLIBC_PREFIX/lib"*) ;;
+                *) echo "      !! rpath 缺少 $TERMUX_GLIBC_PREFIX/lib"; CHK_FAIL=1 ;;
+              esac
+            done
+
+            # 统计 lib/wine 下缺 rpath 的 ARM64 ELF
+            N_BAD=0
+            while IFS= read -r -d '' ELF; do
+              case "$(file -b "$ELF" 2>/dev/null)" in
+                *"ELF 64-bit"*"ARM aarch64"*) ;;
+                *) continue ;;
+              esac
+              readelf -dW "$ELF" 2>/dev/null | grep -q "$TERMUX_GLIBC_PREFIX/lib" || N_BAD=$((N_BAD+1))
+            done < <(find "$PREFIX/lib/wine" -type f -print0 2>/dev/null)
+            echo "  lib/wine 下缺 Termux rpath 的 ARM64 ELF 数量: $N_BAD"
+
+            if [ "$CHK_FAIL" != "0" ]; then
+              echo "❌ 关键二进制 runtime path 修复不完整"
+              exit 1
+            fi
+            echo "✅ patchelf 完成"
+          else
+            echo "⚠️ 无法安装 patchelf，跳过 runtime path 修复"
+            echo "   产物在 Termux glibc 环境下可能因找不到 libc.so.6 而失败"
+          fi
+          # ---- runtime path 修复 end ----
           rm -rf /tmp/pkg
           mkdir -p "/tmp/pkg/${BUILD_NAME}"
           cp -a "$PREFIX/." "/tmp/pkg/${BUILD_NAME}/"
