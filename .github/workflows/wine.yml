@@ -1109,69 +1109,69 @@ jobs:
           fi
 
 
-          # ---- 修复 NLS 断链 ----
-          # make install 对 nls/*.nls 用的是 `ln -s` 指向构建机源码目录
-          # （/opt/wine-src/source/nls/xxx.nls），该路径在用户设备上不存在。
-          # 结果 lib/wine/nls 与 share/wine/nls 下 152 个 .nls 全部悬空，
-          # wineserver 启动时读不到 l_intl.nls 直接 abort，wineboot 无法初始化：
+          # ---- 修复 NLS 绝对路径符号链接 ----
+          # make install 对 nls/*.nls 用的是 `ln -s` 指向构建机源码绝对路径：
+          #   /opt/wine-src/source/nls/xxx.nls
+          # 在 chroot 内这个路径是存在的，所以“检查是否悬空”永远为 0，
+          # 但打包发到用户设备后该路径不存在，152 个 .nls 全部变成断链，
+          # wineserver 读不到 l_intl.nls 直接 abort：
           #   wineserver: failed to load l_intl.nls
           #   wine client error:0: recvmsg: Connection reset by peer
-          # 这里把断链换成真实文件（源码树里就是真文件）。
-          NLS_SRC_CAND=""
+          # 因此判断条件必须是“绝对路径符号链接”，而不是“当前是否悬空”。
+          NLS_SRC_DIR=""
           for d in "$SRC/source/nls" "$SRC/nls" /opt/wine-src/source/nls; do
-            if [ -f "$d/locale.nls" ]; then NLS_SRC_CAND="$d"; break; fi
+            if [ -f "$d/locale.nls" ]; then NLS_SRC_DIR="$d"; break; fi
           done
+          echo "NLS 源目录: ${NLS_SRC_DIR:-<未找到>}"
 
-          if [ -n "$NLS_SRC_CAND" ]; then
-            NLS_FIXED=0
-            for d in "$PREFIX/lib/wine/nls" "$PREFIX/share/wine/nls"; do
-              [ -d "$d" ] || continue
-              for f in "$d"/*.nls; do
-                [ -L "$f" ] || continue
-                [ -e "$f" ] && continue
-                b=$(basename "$f")
-                if [ -f "$NLS_SRC_CAND/$b" ]; then
-                  rm -f "$f"
-                  cp -f "$NLS_SRC_CAND/$b" "$f"
-                  NLS_FIXED=$((NLS_FIXED+1))
-                fi
-              done
+          NLS_FIXED=0
+          NLS_ABS=0
+          for d in "$PREFIX/lib/wine/nls" "$PREFIX/share/wine/nls"; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.nls; do
+              [ -L "$f" ] || continue
+              tgt=$(readlink "$f")
+              case "$tgt" in
+                /*) ;;          # 绝对路径 -> 必须替换
+                *) continue ;;  # 相对路径 -> 安全，跳过
+              esac
+              NLS_ABS=$((NLS_ABS+1))
+              b=$(basename "$f")
+              if [ -n "$NLS_SRC_DIR" ] && [ -f "$NLS_SRC_DIR/$b" ]; then
+                rm -f "$f"
+                cp -f "$NLS_SRC_DIR/$b" "$f"
+                NLS_FIXED=$((NLS_FIXED+1))
+              fi
             done
-            echo "NLS 断链修复: $NLS_FIXED 个 (源: $NLS_SRC_CAND)"
-          else
-            echo "⚠️ 未找到 NLS 源目录，尝试从其他位置回填"
-          fi
+          done
+          echo "NLS 绝对路径软链: $NLS_ABS 个，已替换为真实文件: $NLS_FIXED 个"
 
-          # 兜底：lib/wine/nls 与 share/wine/nls 互补（任一为真文件即可）
+          # 互补：lib/wine/nls 与 share/wine/nls 任一为真文件即可
           for f in "$PREFIX/lib/wine/nls"/*.nls; do
-            [ -e "$f" ] || continue
-            b=$(basename "$f")
-            t="$PREFIX/share/wine/nls/$b"
-            if [ -L "$t" ] && [ ! -e "$t" ]; then
-              rm -f "$t"; cp -f "$f" "$t"
-            fi
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            b=$(basename "$f"); t="$PREFIX/share/wine/nls/$b"
+            if [ -L "$t" ]; then rm -f "$t"; cp -f "$f" "$t"; fi
           done
           for f in "$PREFIX/share/wine/nls"/*.nls; do
-            [ -e "$f" ] || continue
-            b=$(basename "$f")
-            t="$PREFIX/lib/wine/nls/$b"
-            if [ -L "$t" ] && [ ! -e "$t" ]; then
-              rm -f "$t"; cp -f "$f" "$t"
-            fi
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            b=$(basename "$f"); t="$PREFIX/lib/wine/nls/$b"
+            if [ -L "$t" ]; then rm -f "$t"; cp -f "$f" "$t"; fi
           done
 
-          # 校验：不允许还有悬空的 .nls
-          NLS_BROKEN=0
+          # 校验：不允许还有任何绝对路径软链
+          NLS_LEFT=0
           for f in "$PREFIX"/lib/wine/nls/*.nls "$PREFIX"/share/wine/nls/*.nls; do
             [ -L "$f" ] || continue
-            [ -e "$f" ] || NLS_BROKEN=$((NLS_BROKEN+1))
+            case "$(readlink "$f")" in
+              /*) NLS_LEFT=$((NLS_LEFT+1)) ;;
+            esac
           done
-          echo "NLS 悬空链接剩余: $NLS_BROKEN"
-          if [ "$NLS_BROKEN" -gt 0 ]; then
-            echo "❌ NLS 仍有 $NLS_BROKEN 个断链，wineboot 将无法初始化"
+          echo "NLS 剩余绝对路径软链: $NLS_LEFT"
+          if [ "$NLS_LEFT" -gt 0 ]; then
+            echo "❌ NLS 仍有 $NLS_LEFT 个绝对路径软链，设备上会断链，wineboot 无法初始化"
             exit 1
           fi
-          echo "✅ NLS 完备"
+          echo "✅ NLS 完备（无绝对路径软链）"
           # ---- NLS 修复 end ----
 
           # ---- Termux runtime path 修复（patchelf）----
