@@ -281,6 +281,16 @@ jobs:
             echo "⚠️ ci/fix_box64_compat.py 未找到（hook 将尝试在线下载）"
           fi
           
+
+          # box64/ARM64 wow64 修复补丁（同 ci/tkg_prepare_hook.sh 中的调用）
+          if [ -d "$GITHUB_WORKSPACE/ci/patches/wow64" ]; then
+            sudo mkdir -p /tmp/archlinux/tmp/wine-termux/ci/patches
+            sudo cp -r "$GITHUB_WORKSPACE/ci/patches/wow64" /tmp/archlinux/tmp/wine-termux/ci/patches/
+            echo "✅ Copied ci/patches/wow64 ($(ls -1 "$GITHUB_WORKSPACE/ci/patches/wow64" | wc -l) files)"
+          else
+            echo "⚠️ ci/patches/wow64 未找到"
+          fi
+          
           sudo chmod +x /tmp/archlinux/tmp/wine-termux/*.sh
           
           echo "Contents of /tmp/wine-termux:"
