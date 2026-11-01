@@ -1147,10 +1147,10 @@ jobs:
 
             # lib/wine 下所有 ELF
             N_LIB=0
-            while IFS= read -r -d '' f; do
+            for f in $(find "$PREFIX/lib/wine" -type f 2>/dev/null); do
               _patch_one "$f"
               N_LIB=$((N_LIB+1))
-            done < <(find "$PREFIX/lib/wine" -type f -print0 2>/dev/null)
+            done
             echo "  lib/wine 扫描 $N_LIB 个文件"
 
             echo "  patchelf 失败数: $PATCH_FAIL"
@@ -1177,13 +1177,15 @@ jobs:
 
             # 统计 lib/wine 下缺 rpath 的 ARM64 ELF
             N_BAD=0
-            while IFS= read -r -d '' ELF; do
+            for ELF in $(find "$PREFIX/lib/wine" -type f 2>/dev/null); do
               case "$(file -b "$ELF" 2>/dev/null)" in
                 *"ELF 64-bit"*"ARM aarch64"*) ;;
                 *) continue ;;
               esac
-              readelf -dW "$ELF" 2>/dev/null | grep -q "$TERMUX_GLIBC_PREFIX/lib" || N_BAD=$((N_BAD+1))
-            done < <(find "$PREFIX/lib/wine" -type f -print0 2>/dev/null)
+              if ! readelf -dW "$ELF" 2>/dev/null | grep -q "$TERMUX_GLIBC_PREFIX/lib"; then
+                N_BAD=$((N_BAD+1))
+              fi
+            done
             echo "  lib/wine 下缺 Termux rpath 的 ARM64 ELF 数量: $N_BAD"
 
             if [ "$CHK_FAIL" != "0" ]; then
