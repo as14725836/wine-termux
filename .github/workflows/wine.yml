@@ -496,13 +496,21 @@ jobs:
               # 列 pool 目录，找 <pkg>_<ver>_arm64.deb
               idx="${MIRROR}/pool/main/${sub}/"
               if [ -n "${PINVER[$pkg]:-}" ]; then
-              deb="${pkg}_${PINVER[$pkg]}_arm64.deb"
-              curl -s "$idx" | grep -qF "$deb" || deb=""
-            else
-              deb=$(curl -s "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | sort -V | tail -1 || true)
-            fi
+                deb="${pkg}_${PINVER[$pkg]}_arm64.deb"
+                # 固定版本的包必须拿到：直接 HEAD 校验，不做静默降级。
+                # 之前用 `curl -s "$idx" | grep -qF` 判断存在性，服务器目录列表
+                # 偶尔取不到就误判"未找到"，导致该包整个缺失
+                # （glib 的 .pc 缺失 -> gstreamer 的 Requires 解析失败
+                #   -> configure 报 development files not found）。
+                if ! curl -fsI --retry 3 --retry-delay 2 "${idx}${deb}" >/dev/null 2>&1; then
+                  echo "  ERROR: pinned package unavailable: ${idx}${deb}"
+                  exit 1
+                fi
+              else
+                deb=$(curl -s --retry 3 "$idx" | grep -oE "${pkg}_[0-9][^\"]*_(arm64|all)\.deb" | sort -V | tail -1 || true)
+              fi
               if [ -z "$deb" ]; then
-                echo "  ⚠️ 未找到 $pkg (arm64)"
+                echo "  WARN: not found $pkg (arm64)"
                 continue
               fi
               if curl -fsL -o "$deb" "${idx}${deb}"; then
@@ -604,6 +612,23 @@ jobs:
                   -e "s|^libdir=\${prefix}/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
                   "$pc" 2>/dev/null || true
               done
+              # .pc 完备性校验：GStreamer 依赖链缺一不可。
+              # 之前 glib 的 .pc 缺失，gstreamer 的 Requires 解析失败，
+              # configure 只报 "development files not found"，看不出真实原因。
+              MISSING_PC=""
+              for need in glib-2.0 gobject-2.0 gmodule-no-export-2.0 \
+                          gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 \
+                          gstreamer-audio-1.0 gstreamer-tag-1.0; do
+                if [ ! -f "$ARCH_SYSROOT/lib/pkgconfig/${need}.pc" ]; then
+                  MISSING_PC="$MISSING_PC $need"
+                fi
+              done
+              if [ -n "$MISSING_PC" ]; then
+                echo "ERROR: sysroot missing pkg-config files:$MISSING_PC"
+                echo "  available:"; ls "$ARCH_SYSROOT/lib/pkgconfig/" 2>/dev/null | head -40
+                exit 1
+              fi
+              echo "OK: GStreamer dependency .pc complete"
               echo "--- 改写后的 libpulse.pc ---"
               cat "$ARCH_SYSROOT/lib/pkgconfig/libpulse.pc" 2>/dev/null | head -12 || true
               echo "--- pkg-config libpulse 自检（交叉） ---"
