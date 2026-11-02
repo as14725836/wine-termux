@@ -1109,6 +1109,44 @@ jobs:
           fi
 
 
+          # ---- 修复 dwproton 的 __NR_userfaultfd 硬编码 ----
+          # uffd_tmp_defs.h 里 `#else #define __NR_userfaultfd 374` 只在 x86_64 成立；
+          # aarch64 的 userfaultfd 是 282，374 落在 [295...423] 保留区。
+          # Android seccomp 对未知 syscall 直接 SIGSYS，wine 在 virtual_init 阶段
+          # 就被杀：strace 显示 syscall_0x176(...) -> SIGSYS si_syscall=374。
+          UFFD_SCRIPT=""
+          for c in /tmp/wt-scripts/ci/fix_uffd_nr.py \
+                   /tmp/wine-termux/ci/fix_uffd_nr.py \
+                   "$SRC/../wine-termux/ci/fix_uffd_nr.py"; do
+            if [ -f "$c" ]; then UFFD_SCRIPT="$c"; break; fi
+          done
+
+          UFFD_HDR=""
+          for p in "$SRC/source/dlls/ntdll/unix/uffd_tmp_defs.h" \
+                   "$SRC/dlls/ntdll/unix/uffd_tmp_defs.h"; do
+            if [ -f "$p" ]; then UFFD_HDR="$p"; break; fi
+          done
+
+          if [ -n "$UFFD_HDR" ]; then
+            if [ -n "$UFFD_SCRIPT" ]; then
+              echo "uffd fix script: $UFFD_SCRIPT"
+              python3 "$UFFD_SCRIPT" "$UFFD_HDR" || true
+            else
+              echo "⚠️ fix_uffd_nr.py 未找到，退回内联 sed"
+              sed -i 's|^#define __NR_userfaultfd 374$|#define __NR_userfaultfd 282|' "$UFFD_HDR" || true
+            fi
+            echo "--- uffd_tmp_defs.h 校验"
+            grep -n '__NR_userfaultfd' "$UFFD_HDR" | head -8
+            if grep -q 'define __NR_userfaultfd 374' "$UFFD_HDR" && ! grep -q 'WINE_TERMUX_NR_FIXED' "$UFFD_HDR"; then
+              echo "❌ __NR_userfaultfd 仍为 374，Android 上会 SIGSYS"
+              exit 1
+            fi
+            echo "✅ uffd syscall 编号已处理"
+          else
+            echo "ℹ️ 未找到 uffd_tmp_defs.h（该树不用 uffd writewatch）"
+          fi
+          # ---- uffd 修复 end ----
+
           # ---- 修复 NLS 绝对路径符号链接 ----
           # make install 对 nls/*.nls 用的是 `ln -s` 指向构建机源码绝对路径：
           #   /opt/wine-src/source/nls/xxx.nls
