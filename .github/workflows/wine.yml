@@ -385,6 +385,8 @@ jobs:
                [libpcre2-dev]="p/pcre2"
                # gobject-2.0.pc 的 Requires.private 需要 libffi.pc
                [libffi-dev]="libf/libffi"
+               # gstreamer-video/audio-1.0 的 Requires.private 需要 orc-0.4
+               [liborc-0.4-dev]="o/orc"
                [libgstreamer-plugins-base1.0-dev]="g/gst-plugins-base1.0"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
@@ -496,6 +498,7 @@ jobs:
               [libglib2.0-dev]="2.74.6-2+deb12u9"
               [libpcre2-dev]="10.42-1"
               [libffi-dev]="3.4.4-1"
+              [liborc-0.4-dev]="0.4.44-1"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -624,7 +627,7 @@ jobs:
               # configure 只报 "development files not found"，看不出真实原因。
               MISSING_PC=""
               for need in glib-2.0 gobject-2.0 gmodule-no-export-2.0 libpcre2-8 \
-                          libffi libdrm zlib \
+                          libffi libdrm zlib orc-0.4 \
                           gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 \
                           gstreamer-audio-1.0 gstreamer-tag-1.0; do
                 if [ ! -f "$ARCH_SYSROOT/lib/pkgconfig/${need}.pc" ]; then
@@ -1133,14 +1136,20 @@ jobs:
           echo "===== GStreamer diagnostics ====="
           echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
           echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR"
-          echo "--- gstreamer/glib .pc in sysroot"
-          ls /usr/aarch64-linux-gnu/lib/pkgconfig/ 2>/dev/null | grep -iE 'gst|glib|orc' || echo "(none)"
+          echo "--- pkg-config version"
+          pkg-config --version 2>&1 | head -2
+          echo "--- ALL .pc in sysroot pkgconfig"
+          ls /usr/aarch64-linux-gnu/lib/pkgconfig/ 2>/dev/null | tr '\n' ' '
+          echo
+          echo "--- lib64 pkgconfig"
+          ls /usr/aarch64-linux-gnu/lib64/pkgconfig/ 2>/dev/null | tr '\n' ' '
+          echo
           echo "--- pkg-config probe"
           for m in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 glib-2.0 gobject-2.0; do
-            if pkg-config --exists "$m" 2>/tmp/pcerr.txt; then
+            if pkg-config --print-errors --exists "$m" 2>/tmp/pcerr.txt; then
               echo "  $m: OK cflags=[$(pkg-config --cflags "$m" 2>/dev/null)] libs=[$(pkg-config --libs "$m" 2>/dev/null)]"
             else
-              echo "  $m: FAIL -> $(cat /tmp/pcerr.txt)"
+              echo "  $m: FAIL -> $(grep -oE "Package '[^']+'" /tmp/pcerr.txt | sort -u | tr '\n' ' ')"
             fi
           done
           echo "--- headers"
