@@ -590,6 +590,7 @@ jobs:
                   -e "s|^includedir=\${prefix}/include$|includedir=$ARCH_SYSROOT/include|" \
                   -e "s|^libdir=/usr/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
                   -e "s|^libdir=\${exec_prefix}/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
+                  -e "s|^libdir=\${prefix}/lib/aarch64-linux-gnu$|libdir=$ARCH_SYSROOT/lib|" \
                   "$pc" 2>/dev/null || true
               done
               echo "--- 改写后的 libpulse.pc ---"
