@@ -378,6 +378,9 @@ jobs:
               [libgles-dev]="libg/libglvnd"
               [libglx-dev]="libg/libglvnd"
               [libopengl-dev]="libo/libglvnd"
+               # GStreamer (winegstreamer codecs): gstreamer-1.0 + video/audio/tag/gl modules
+               [libgstreamer1.0-dev]="g/gstreamer1.0"
+               [libgstreamer-plugins-base1.0-dev]="g/gst-plugins-base1.0"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -477,6 +480,9 @@ jobs:
               [libspeex1]="s/speex"
               [libtwolame0]="t/twolame"
               [libwavpack1]="w/wavpack"
+               # GStreamer runtime libs (real .so.N)
+               [libgstreamer1.0-0]="g/gstreamer1.0"
+               [libgstreamer-plugins-base1.0-0]="g/gst-plugins-base1.0"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -851,6 +857,25 @@ jobs:
           grep -rn 'machine-id' server/token.c dlls/ntdll/unix/system.c 2>/dev/null | head -6 || true
 
           echo "--- Termux 平台补丁完成 ---"
+
+          # ---- (5) 去掉 winegstreamer 的 GstGL 依赖 ----
+          # 启用 GStreamer 后，winegstreamer 默认探测 gstreamer-gl-1.0，
+          # 它依赖 OpenGL/EGL 头与库，Android 交叉编译下易失败。
+          # 用 shim 覆盖 3 个 GstGL 函数 + 2 个类型，并从 configure.ac
+          # 去掉 gstreamer-gl-1.0（对齐 termux-glibc-mangohud / AndreRH）。
+          GSTGL_PY=""
+          for c in /tmp/wt-scripts/ci/strip_gstgl.py \
+                   /tmp/wine-termux/ci/strip_gstgl.py; do
+            [ -f "$c" ] && { GSTGL_PY="$c"; break; }
+          done
+          if [ -n "$GSTGL_PY" ] && [ -d dlls/winegstreamer ]; then
+            echo "  gstgl 脚本: $GSTGL_PY"
+            python3 "$GSTGL_PY" "$PWD" || { echo "ERROR: strip_gstgl 自检失败"; exit 1; }
+          else
+            echo "  WARN: strip_gstgl.py 未找到，或该树无 winegstreamer（GstGL 依赖未处理）"
+          fi
+          # ---- GstGL 去依赖 end ----
+
           # ---- Termux 平台补丁 end ----
 
           # 5.4 cs-timeout-guard
@@ -1072,7 +1097,7 @@ jobs:
             --with-pulse --without-oss --with-alsa --without-cups --without-gphoto \
             --without-gssapi --without-krb5 --without-pcap --without-pcsclite \
             --without-sane --without-usb --without-v4l2 --without-dbus --without-udev \
-            --without-gstreamer \
+            --with-gstreamer \
             2>&1 | tail -120 || { echo "❌ configure 失败"; tail -60 config.log; exit 1; }
           set +x
 
