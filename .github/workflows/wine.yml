@@ -146,6 +146,10 @@ permissions:
 env:
   BCC_ROOTFS_URL: https://github.com/as14725836/BCC/releases/download/wine-bcc-latest/wine-bcc.tar.xz
   TERMUX_GLIBC_PREFIX: /data/data/com.termux/files/usr/glibc
+  # Android 上 /tmp 不可写，wine 的 socket 目录必须改到 Termux tmp
+  TERMUX_TMP: /data/data/com.termux/files/usr/tmp
+  # Wine 从 machine-id 派生本地用户 SID / 系统 UUID
+  TERMUX_MACHINE_ID: /data/data/com.termux/files/usr/glibc/etc/machine-id
   TERMUX_PREFIX: /data/data/com.termux/files/usr
   OUT_DIR: /tmp/archlinux/tmp/wt-out
 
@@ -210,6 +214,8 @@ jobs:
           FEX_REPO="@@FEX_REPO@@"
           FEX_REF="@@FEX_REF@@"
           TERMUX_GLIBC_PREFIX="@@TERMUX_GLIBC_PREFIX@@"
+          TERMUX_TMP="@@TERMUX_TMP@@"
+          TERMUX_MACHINE_ID="@@TERMUX_MACHINE_ID@@"
 
           WS=/tmp/wt-scripts
           SRC=/opt/wine-src
@@ -732,6 +738,120 @@ jobs:
           if [ -f "$WS/patches/wow64/wow64-completion.py" ]; then
             python3 "$WS/patches/wow64/wow64-completion.py" "$PWD" || echo "⚠️ wow64-completion 跳过"
           fi
+
+          # 5.3b Termux 平台补丁（移植自 termux-glibc-mangohud）
+          # ------------------------------------------------------------------
+          # (1) /tmp 路径：Android 上 /tmp 不可写，wine 的 socket 目录
+          #     /tmp/.wine-<uid>/server-* 建不出来，wineserver 起不来。
+          # (2) userfaultfd：dwproton 的 uffd_tmp_defs.h 把非 x86_64 分支写死成 374，
+          #     aarch64 真正的编号是 282（374 落在 [295...423] 保留区）。
+          #     Android seccomp 对未知 syscall 直接 SIGSYS 杀进程。
+          #     这里直接禁用，比改编号更稳。
+          # (3) xtajit -> FEX 的 DLL 改名。
+          # (4) machine-id 路径重定向（Termux 上 /etc 与 /var/lib/dbus 不可用）。
+          echo "--- Termux 平台补丁 ---"
+
+          if [ -z "${TERMUX_TMP:-}" ] || [ -z "${TERMUX_MACHINE_ID:-}" ]; then
+            echo "ERROR: TERMUX_TMP/TERMUX_MACHINE_ID 未注入（模板占位符替换失败）"
+            exit 1
+          fi
+          echo "  TERMUX_TMP        = $TERMUX_TMP"
+          echo "  TERMUX_MACHINE_ID = $TERMUX_MACHINE_ID"
+
+          # ---- (1) /tmp -> Termux tmp ----
+          for f in \
+            server/file.c \
+            server/server.c \
+            server/request.c \
+            loader/loader.c \
+            dlls/ntdll/loader.c \
+            dlls/ntdll/unix/server.c \
+            dlls/ntdll/unix/virtual.c
+          do
+            [ -f "$f" ] || continue
+            sed -i "s|\"/tmp\"|\"${TERMUX_TMP}\"|g" "$f"
+            sed -i "s|/tmp/|${TERMUX_TMP}/|g" "$f"
+          done
+
+          echo "--- 校验 wine socket 目录"
+          if grep -rn '"/tmp/\.wine-' server/request.c dlls/ntdll/unix/server.c 2>/dev/null; then
+            echo "ERROR: /tmp/.wine- 仍存在，socket 目录未改到 Termux tmp"
+            exit 1
+          fi
+          grep -n 'wine-' server/request.c 2>/dev/null | head -3 || true
+
+          # ---- (2) 禁用 userfaultfd ----
+          UFFD_PY=""
+          for c in /tmp/wt-scripts/ci/disable_uffd.py \
+                   /tmp/wine-termux/ci/disable_uffd.py \
+                   /tmp/wt-scripts/ci/fix_uffd_nr.py; do
+            [ -f "$c" ] && { UFFD_PY="$c"; break; }
+          done
+
+          FILE_VIRTUAL="dlls/ntdll/unix/virtual.c"
+          if [ -f "$FILE_VIRTUAL" ]; then
+            if [ -n "$UFFD_PY" ]; then
+              echo "  uffd 脚本: $UFFD_PY"
+              python3 "$UFFD_PY" "$FILE_VIRTUAL" || true
+            else
+              echo "  WARN: uffd 脚本缺失，退回 sed"
+              sed -i 's|^\([[:space:]]*\)uffd_fd = syscall( __NR_userfaultfd.*$|\1uffd_fd = -1; /* Termux uffd off */|' "$FILE_VIRTUAL" || true
+            fi
+            if grep -q 'uffd_fd = syscall( __NR_userfaultfd' "$FILE_VIRTUAL"; then
+              echo "ERROR: virtual.c 里 userfaultfd syscall 仍存在，Android 上会 SIGSYS"
+              grep -n 'uffd_fd' "$FILE_VIRTUAL" | head -5
+              exit 1
+            fi
+            echo "  OK: userfaultfd 已禁用"
+            grep -n 'uffd_fd' "$FILE_VIRTUAL" | head -3 || true
+          fi
+
+          # ---- (3) xtajit -> FEX ----
+          if [ -f loader/wine.inf.in ]; then
+            sed -i 's/"xtajit64\.dll"/"libarm64ecfex.dll"/g' loader/wine.inf.in || true
+            sed -i 's/"xtajit\.dll"/"libwow64fex.dll"/g'     loader/wine.inf.in || true
+          fi
+          if [ -f dlls/ntdll/loader.c ]; then
+            sed -i 's/xtajit64\.dll/libarm64ecfex.dll/g' dlls/ntdll/loader.c || true
+            sed -i 's/xtajit\.dll/libwow64fex.dll/g'     dlls/ntdll/loader.c || true
+          fi
+          find . -path ./.git -prune -o -type f -name '*.c' -print0 2>/dev/null |
+            xargs -0 -r sed -i 's/xtajit64\.dll/libarm64ecfex.dll/g' 2>/dev/null || true
+          find . -path ./.git -prune -o -type f -name '*.c' -print0 2>/dev/null |
+            xargs -0 -r sed -i 's/xtajit\.dll/libwow64fex.dll/g' 2>/dev/null || true
+          find . -path ./.git -prune -o -type f -name '*.h' -print0 2>/dev/null |
+            xargs -0 -r sed -i 's/xtajit64\.dll/libarm64ecfex.dll/g' 2>/dev/null || true
+          find . -path ./.git -prune -o -type f -name '*.h' -print0 2>/dev/null |
+            xargs -0 -r sed -i 's/xtajit\.dll/libwow64fex.dll/g' 2>/dev/null || true
+
+          find dlls/ntdll -type f -name '*.c' -print0 2>/dev/null |
+            xargs -0 -r sed -i 's|x86_64-windows|aarch64-windows|g' 2>/dev/null || true
+          echo "  OK: xtajit/FEX 名称已改写"
+
+          # ---- (4) machine-id 路径 ----
+          MID_SCRIPT=""
+          for c in /tmp/wt-scripts/patches/wow64/fix_termux_machine_id.py \
+                   /tmp/wine-termux/fix_termux_machine_id.py \
+                   "$WS/patches/wow64/fix_termux_machine_id.py"; do
+            [ -f "$c" ] && { MID_SCRIPT="$c"; break; }
+          done
+          if [ -n "$MID_SCRIPT" ]; then
+            echo "  machine-id 脚本: $MID_SCRIPT"
+            TERMUX_MACHINE_ID="$TERMUX_MACHINE_ID" python3 "$MID_SCRIPT" "$PWD" || \
+              echo "  WARN: machine-id 补丁未完全应用"
+          else
+            echo "  WARN: fix_termux_machine_id.py 未找到，用 sed 粗替换"
+            for f in server/token.c dlls/ntdll/unix/system.c; do
+              [ -f "$f" ] || continue
+              sed -i "s|\"/etc/machine-id\"|\"${TERMUX_MACHINE_ID}\"|g" "$f" || true
+              sed -i "s|\"/var/lib/dbus/machine-id\"|\"${TERMUX_MACHINE_ID}\"|g" "$f" || true
+            done
+          fi
+          echo "--- machine-id 校验"
+          grep -rn 'machine-id' server/token.c dlls/ntdll/unix/system.c 2>/dev/null | head -6 || true
+
+          echo "--- Termux 平台补丁完成 ---"
+          # ---- Termux 平台补丁 end ----
 
           # 5.4 cs-timeout-guard
           if [ -f "$WS/patches/sync/cs-timeout-guard.py" ]; then
@@ -1377,6 +1497,8 @@ jobs:
           IN_FEX_REPO: ${{ inputs.fex_repo || 'AndreRH/FEX' }}
           IN_FEX_REF: ${{ inputs.fex_ref || 'arm64ec' }}
           IN_TERMUX_GLIBC_PREFIX: ${{ env.TERMUX_GLIBC_PREFIX }}
+          IN_TERMUX_TMP: ${{ env.TERMUX_TMP }}
+          IN_TERMUX_MACHINE_ID: ${{ env.TERMUX_MACHINE_ID }}
         run: |
           set -e
           python3 - "$GITHUB_WORKSPACE" <<'PYGEN'
@@ -1401,6 +1523,8 @@ jobs:
               "@@FEX_REPO@@": os.environ["IN_FEX_REPO"],
               "@@FEX_REF@@": os.environ["IN_FEX_REF"],
               "@@TERMUX_GLIBC_PREFIX@@": os.environ["IN_TERMUX_GLIBC_PREFIX"],
+              "@@TERMUX_TMP@@": os.environ["IN_TERMUX_TMP"],
+              "@@TERMUX_MACHINE_ID@@": os.environ["IN_TERMUX_MACHINE_ID"],
           }
           tpl = open("/tmp/arm64-build.sh.tpl").read()
           for k, v in m.items():
