@@ -1096,6 +1096,34 @@ jobs:
           export LDFLAGS="$LDFLAGS -Wl,-O1 -Wl,--as-needed -Wl,--unresolved-symbols=ignore-in-shared-libs"
 
           set -x
+          # ---- GStreamer cross-probe diagnostics ----
+          echo "===== GStreamer diagnostics ====="
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+          echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR"
+          echo "--- gstreamer/glib .pc in sysroot"
+          ls /usr/aarch64-linux-gnu/lib/pkgconfig/ 2>/dev/null | grep -iE 'gst|glib|orc' || echo "(none)"
+          echo "--- pkg-config probe"
+          for m in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 glib-2.0 gobject-2.0; do
+            if pkg-config --exists "$m" 2>/tmp/pcerr.txt; then
+              echo "  $m: OK cflags=[$(pkg-config --cflags "$m" 2>/dev/null)] libs=[$(pkg-config --libs "$m" 2>/dev/null)]"
+            else
+              echo "  $m: FAIL -> $(cat /tmp/pcerr.txt)"
+            fi
+          done
+          echo "--- headers"
+          ls /usr/aarch64-linux-gnu/include/gstreamer-1.0/gst/gst.h 2>&1 | head -2 || true
+          echo "--- libs"
+          ls -l /usr/aarch64-linux-gnu/lib/libgstreamer-1.0.so* 2>&1 | head -4 || true
+          echo "--- manual compile+link test"
+          printf '%s\n' '#include <gst/gst.h>' 'int main(void){ return gst_pad_new("probe") != 0 ? 0 : 1; }' > /tmp/gstchk.c
+          if aarch64-linux-gnu-gcc $(pkg-config --cflags gstreamer-1.0 2>/dev/null) /tmp/gstchk.c -o /tmp/gstchk $(pkg-config --libs gstreamer-1.0 2>/dev/null) 2>/tmp/gstchk.err; then
+            echo "  link test OK"
+          else
+            echo "  link test FAIL:"
+            head -20 /tmp/gstchk.err
+          fi
+          echo "===== GStreamer diagnostics end ====="
+
           "$SRC/source/configure" \
             --enable-win64 \
             --host=aarch64-linux-gnu \
