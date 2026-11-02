@@ -380,6 +380,11 @@ jobs:
               [libopengl-dev]="libo/libglvnd"
                # GStreamer (winegstreamer codecs): gstreamer-1.0 + video/audio/tag/gl modules
                [libgstreamer1.0-dev]="g/gstreamer1.0"
+               # glib-2.0.pc 的 Requires.private 需要 libpcre2-8.pc，
+               # 缺它 pkg-config 解析 glib 失败，连累 gstreamer 全部 FAIL
+               [libpcre2-dev]="p/pcre2"
+               # gobject-2.0.pc 的 Requires.private 需要 libffi.pc
+               [libffi-dev]="libf/libffi"
                [libgstreamer-plugins-base1.0-dev]="g/gst-plugins-base1.0"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
@@ -489,6 +494,8 @@ jobs:
             # 而 gstreamer 依赖它们。这里对这类包固定到 deb12 稳定版。
             declare -A PINVER=(
               [libglib2.0-dev]="2.74.6-2+deb12u9"
+              [libpcre2-dev]="10.42-1"
+              [libffi-dev]="3.4.4-1"
             )
             fetched=0
             for pkg in "${!DEBPKG[@]}"; do
@@ -616,7 +623,8 @@ jobs:
               # 之前 glib 的 .pc 缺失，gstreamer 的 Requires 解析失败，
               # configure 只报 "development files not found"，看不出真实原因。
               MISSING_PC=""
-              for need in glib-2.0 gobject-2.0 gmodule-no-export-2.0 \
+              for need in glib-2.0 gobject-2.0 gmodule-no-export-2.0 libpcre2-8 \
+                          libffi libdrm zlib \
                           gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 \
                           gstreamer-audio-1.0 gstreamer-tag-1.0; do
                 if [ ! -f "$ARCH_SYSROOT/lib/pkgconfig/${need}.pc" ]; then
