@@ -392,6 +392,8 @@ jobs:
                # --cflags 返回空 → WINE_PACKAGE_FLAGS 跳过检查 → configure 误判 gst 缺失
                [libx11-xcb-dev]="libx/libx11"
                [libgudev-1.0-dev]="libg/libgudev"
+               # gudev-1.0.pc 的 Requires.private 需要 libudev.pc
+               [libudev-dev]="s/systemd"
                [libgbm-dev]="m/mesa"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
@@ -403,6 +405,8 @@ jobs:
               [libexpat1]="e/expat"
               [libglib2.0-0t64]="g/glib2.0"
               [libx11-6]="libx/libx11"
+              [libudev1]="s/systemd"
+              [libgbm1]="m/mesa"
               [libxext6]="libx/libxext"
               [libxi6]="libx/libxi"
               [libxcursor1]="libx/libxcursor"
