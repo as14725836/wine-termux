@@ -77,6 +77,8 @@ import sys
 
 SENTINEL = "/* TERMUX_WINEBOOT_WOW64_DECOUPLE */"
 
+from strict_patch import PatchStatus, finish
+
 OLD = """        if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
         {
             for (;;)
@@ -188,11 +190,23 @@ def patch_file(path):
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else ".."
     target = os.path.join(root, "programs", "wineboot", "wineboot.c")
+    st = PatchStatus("wineboot-decouple")
     if not os.path.isfile(target):
         print("  [skip] %s not found" % target)
-        return 0
-    patch_file(target)
-    return 0
+        st.skip("wineboot.c 不存在")
+        return finish(st)
+    with open(target, "r", encoding="utf-8", errors="surrogateescape") as f:
+        _src = f.read()
+    if SENTINEL in _src:
+        print("  [skip] already patched")
+        st.idempotent("已含 %s" % SENTINEL)
+        return finish(st)
+    ok = patch_file(target)
+    if ok:
+        st.applied("wineboot.c: Wow64Install decouple")
+    else:
+        st.missing("wineboot.c 锚点缺失（update_wineprefix 里的 Wow64Install 段）")
+    return finish(st)
 
 
 if __name__ == "__main__":
