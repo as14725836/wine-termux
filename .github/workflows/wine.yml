@@ -1230,6 +1230,23 @@ jobs:
               echo "  $m: FAIL -> $(grep -oE "Package '[^']+'" /tmp/pcerr.txt | sort -u | tr '\n' ' ')"
             fi
           done
+          echo "--- wine 的完整 gst 模块串（WINE_PACKAGE_FLAGS 实际调用）"
+          GST_ALL="gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 gstreamer-gl-1.0"
+          echo "  cflags=[$(pkg-config --cflags $GST_ALL 2>/tmp/gsterr.txt)] rc=$?"
+          echo "  libs  =[$(pkg-config --libs   $GST_ALL 2>>/tmp/gsterr.txt)]"
+          if [ -s /tmp/gsterr.txt ]; then
+            echo "  ❌ pkg-config stderr:"; sed 's/^/     /' /tmp/gsterr.txt | head -20
+          else
+            echo "  pkg-config stderr: (empty)"
+          fi
+          echo "  --- 逐个模块 ---"
+          for _m in $GST_ALL; do
+            if pkg-config --exists "$_m" 2>/tmp/e1.txt; then
+              echo "    ok  $_m"
+            else
+              echo "    FAIL $_m :: $(tr '\n' ' ' < /tmp/e1.txt)"
+            fi
+          done
           echo "--- headers"
           ls /usr/aarch64-linux-gnu/include/gstreamer-1.0/gst/gst.h 2>&1 | head -2 || true
           echo "--- libs"
