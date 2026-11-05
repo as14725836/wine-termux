@@ -347,7 +347,8 @@ fi
     for _p in \
       inject_disable_epoll_pwait2.py \
       inject_preloader_wow64_guard.py \
-      inject_wineboot_wow64_decouple.py ; do
+      inject_wineboot_wow64_decouple.py \
+      inject_gst_no_gl.py ; do
       if [ -f "$_wow64_patch_dir/$_p" ]; then
         msg2 "wow64 fixes: running $_p"
         python3 "$_wow64_patch_dir/$_p" . || warning "wow64 fixes: $_p failed, continuing"
@@ -360,6 +361,7 @@ fi
     msg2 "  epoll_pwait2 disabled : $(grep -c 'NO_EPOLL_PWAIT2_FOR_TERMUX' server/fd.c 2>/dev/null || echo 0)"
     msg2 "  hostguard injected   : $(grep -c 'TERMUX_WOW64_HOSTGUARD' dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
     msg2 "  wineboot decoupled   : $(grep -c 'TERMUX_WINEBOOT_WOW64_DECOUPLE' programs/wineboot/wineboot.c 2>/dev/null || echo 0)"
+    msg2 "  gst no-gl switch     : $(grep -c 'wine_gst_no_gl' dlls/winegstreamer/unixlib.c 2>/dev/null || echo 0)"
   else
     warning "wow64 fixes: patch dir not found, skipped"
   fi
