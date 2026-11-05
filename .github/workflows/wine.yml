@@ -1266,12 +1266,20 @@ jobs:
           printf '%s\n' 'extern void *gst_pad_new(void);' \
                  'int main(void){ return gst_pad_new() != 0 ? 0 : 1; }' > /tmp/g2.c
           GST_LIBS="$(pkg-config --libs gstreamer-1.0 2>/dev/null)"
+          GST_ALL_LIBS="$(pkg-config --libs gstreamer-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 gstreamer-gl-1.0 2>/dev/null)"
+          echo "    GST_ALL_LIBS=[$GST_ALL_LIBS]"
           echo "    GST_LIBS=[$GST_LIBS]"
           echo "    LDFLAGS=[$LDFLAGS]"
           if aarch64-linux-gnu-gcc $LDFLAGS /tmp/g2.c -o /tmp/g2 $GST_LIBS 2>/tmp/g2.err; then
             echo "    ✅ AC_CHECK_LIB 等价链接 OK"
           else
             echo "    ❌ link FAIL:"; sed 's/^/      /' /tmp/g2.err | head -20
+          fi
+          echo "    -- 用 wine 实际使用的完整 5 模块 libs 再试一次 --"
+          if aarch64-linux-gnu-gcc $LDFLAGS /tmp/g2.c -o /tmp/g4 $GST_ALL_LIBS 2>/tmp/g4.err; then
+            echo "    ✅ 5 模块 libs 链接 OK"
+          else
+            echo "    ❌ 5 模块 libs 链接 FAIL:"; sed 's/^/      /' /tmp/g4.err | head -25
           fi
           echo "    -- 试去掉 --as-needed --"
           if aarch64-linux-gnu-gcc $(echo "$LDFLAGS" | sed 's/-Wl,--as-needed//') /tmp/g2.c -o /tmp/g3 $GST_LIBS 2>/tmp/g3.err; then
