@@ -336,7 +336,12 @@ fi
   # 背景：dwproton 是 x86_64 Wine，在 aarch64 宿主上靠 box64 翻译运行。
   # 三个病灶叠加会让 prefix 初始化后 syswow64/ 为空，进而出现
   #   wine: could not load kernel32.dll, status c0000135
-  # 每个补丁都是幂等的，找不到锚点只 WARN 不中断构建。
+  # 每个补丁都是幂等的。但"找不到锚点"必须让构建失败：
+  # 历史上 ci/strip_gstgl.py 被删后，整个步骤只 WARN 不报错，
+  # 连续多轮构建"绿色"但 GstGL 根本没 strip，排错成本极高。
+  # 现在由 ci/patches/wow64/strict_patch.py 统一判定：
+  #   APPLIED/IDEMPOTENT/SKIP -> 通过
+  #   MISSING/ERROR           -> 非零退出（可用 STRICT_PATCH=0 临时放行）
   _wow64_patch_dir=""
   for _c in "${GITHUB_WORKSPACE}/ci/patches/wow64" "/tmp/wine-termux/ci/patches/wow64" "/tmp/ci/patches/wow64"; do
     if [ -d "$_c" ]; then _wow64_patch_dir="$_c"; break; fi
@@ -351,17 +356,55 @@ fi
       inject_gst_no_gl.py ; do
       if [ -f "$_wow64_patch_dir/$_p" ]; then
         msg2 "wow64 fixes: running $_p"
-        python3 "$_wow64_patch_dir/$_p" . || warning "wow64 fixes: $_p failed, continuing"
+        # 严格模式：脚本内部用 strict_patch.finish() 决定退出码。
+        # 失败不再 "continuing"，直接中断（STRICT_PATCH=0 可临时放行）。
+        if ! PYTHONPATH="$_wow64_patch_dir${PYTHONPATH:+:$PYTHONPATH}" \
+             python3 "$_wow64_patch_dir/$_p" .; then
+          if [ "${STRICT_PATCH:-1}" = "0" ]; then
+            warning "wow64 fixes: $_p failed (STRICT_PATCH=0, 放行)"
+          else
+            error "wow64 fixes: $_p 失败 —— 上游代码可能已变更，补丁锚点失效。"
+            error "  修好 ci/patches/wow64/$_p 后重试，或设 STRICT_PATCH=0 临时放行。"
+            return 1
+          fi
+        fi
       else
         warning "wow64 fixes: $_p not found in $_wow64_patch_dir"
       fi
     done
-    # 校验：三个 SENTINEL 是否都落地
+    # ---- 落地断言 ----
+    # 上面脚本返回 0 只代表"没有 MISSING"，仍需确认 SENTINEL 真的在源码里。
+    # 每个补丁分两种合法终态：
+    #   命中（grep >= 1）                         -> ok
+    #   该树本就没有对应机制（例如上游已删 GstGL） -> ok，n/a
+    # 其余情况（该有却没有）-> 失败。
     msg2 "wow64 fixes self-check:"
-    msg2 "  epoll_pwait2 disabled : $(grep -c 'NO_EPOLL_PWAIT2_FOR_TERMUX' server/fd.c 2>/dev/null || echo 0)"
-    msg2 "  hostguard injected   : $(grep -c 'TERMUX_WOW64_HOSTGUARD' dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)"
-    msg2 "  wineboot decoupled   : $(grep -c 'TERMUX_WINEBOOT_WOW64_DECOUPLE' programs/wineboot/wineboot.c 2>/dev/null || echo 0)"
-    msg2 "  gst no-gl switch     : $(grep -c 'wine_gst_no_gl' dlls/winegstreamer/unixlib.c 2>/dev/null || echo 0)"
+    _wfail=0
+    _chk() {
+      # $1=描述 $2=计数 $3="optional" 表示允许"该树无此机制"
+      _wn="$2"
+      if [ "${_wn:-0}" -ge 1 ] 2>/dev/null; then
+        msg2 "  $1: $_wn (ok)"
+      elif [ "$3" = "optional" ]; then
+        msg2 "  $1: 0 (n/a, 该树无此机制)"
+      else
+        error "  $1: 0 (缺失!)"
+        _wfail=1
+      fi
+    }
+    _chk "epoll_pwait2 disabled" "$(grep -c 'NO_EPOLL_PWAIT2_FOR_TERMUX' server/fd.c 2>/dev/null || echo 0)" mandatory
+    _chk "hostguard injected"    "$(grep -c 'TERMUX_WOW64_HOSTGUARD' dlls/ntdll/unix/loader.c 2>/dev/null || echo 0)" mandatory
+    _chk "wineboot decoupled"    "$(grep -c 'TERMUX_WINEBOOT_WOW64_DECOUPLE' programs/wineboot/wineboot.c 2>/dev/null || echo 0)" mandatory
+    # gst：该树可能压根没有 winegstreamer（如 proton-9.0-arm64ec），故 optional
+    _chk "gst no-gl switch"      "$(grep -c 'wine_gst_no_gl' dlls/winegstreamer/unixlib.c 2>/dev/null || echo 0)" optional
+    if [ "$_wfail" -ne 0 ]; then
+      if [ "${STRICT_PATCH:-1}" = "0" ]; then
+        warning "wow64 fixes self-check: 有缺失但 STRICT_PATCH=0，放行"
+      else
+        error "wow64 fixes self-check 失败：补丁脚本报成功但源码里没有 SENTINEL。"
+        return 1
+      fi
+    fi
   else
     warning "wow64 fixes: patch dir not found, skipped"
   fi
