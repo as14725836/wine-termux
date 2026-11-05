@@ -1253,6 +1253,23 @@ jobs:
               echo "    FAIL $_m :: $(tr '\n' ' ' < /tmp/e1.txt)"
             fi
           done
+          echo "--- libs 实体检查（链接 -lgst*-1.0 是否可解析）"
+          for _l in gstreamer-1.0 gstbase-1.0 gstvideo-1.0 gstaudio-1.0 gsttag-1.0 gstgl-1.0; do
+            if ls /usr/aarch64-linux-gnu/lib/lib${_l}.so >/dev/null 2>&1; then
+              echo "    ok   lib${_l}.so -> $(readlink -f /usr/aarch64-linux-gnu/lib/lib${_l}.so 2>/dev/null | xargs -r basename)"
+            else
+              echo "    FAIL lib${_l}.so 不存在"
+            fi
+          done
+          echo "--- AC_CHECK_LIB 等价链接测试（gst_pad_new from -lgstreamer-1.0）"
+          printf '%s\n' '#include <gst/gst.h>' \
+                 'int main(void){ gst_pad_new("x", GST_PAD_SRC); return 0; }' > /tmp/g2.c
+          if aarch64-linux-gnu-gcc -O2 /tmp/g2.c -o /tmp/g2 \
+               $(pkg-config --libs gstreamer-1.0 2>/dev/null) 2>/tmp/g2.err; then
+            echo "    link OK"
+          else
+            echo "    ❌ link FAIL:"; sed 's/^/      /' /tmp/g2.err | head -15
+          fi
           echo "--- headers"
           ls /usr/aarch64-linux-gnu/include/gstreamer-1.0/gst/gst.h 2>&1 | head -2 || true
           echo "--- libs"
