@@ -25,6 +25,8 @@ import os
 import sys
 
 DIR = "dlls/winegstreamer"
+from strict_patch import PatchStatus, finish
+
 MARK = "wine_gst_no_gl"
 GST_ENV_READ = '''\tif (wine_gst_no_gl == -1)
 \t\twine_gst_no_gl = getenv("WINE_GST_NO_GL") && atoi(getenv("WINE_GST_NO_GL"));
@@ -115,6 +117,21 @@ def inject_wg_parser(path):
     return "OK: use_opengl hook inserted"
 
 
+def classify(r):
+    """把注入函数返回的状态串映射成 strict_patch 的类别。
+
+    OK  -> APPLIED（本次注入成功）
+    SKIP-> IDEMPOTENT 或 SKIP（都是正常，不算失败）
+    WARN-> MISSING（本该注入却找不到锚点，上游可能已改）
+    """
+    if r.startswith("OK") or r.startswith("(dry) OK"):
+        return "applied"
+    if r.startswith("SKIP"):
+        # "already present" 属于幂等；其余是"该树不需要"
+        return "idempotent" if "already present" in r else "skip"
+    return "missing"
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit("usage: %s <wine-source-dir> [--dry-run]" % sys.argv[0])
@@ -126,17 +143,21 @@ def main():
         "unixlib.c": os.path.join(base, "unixlib.c"),
         "wg_parser.c": os.path.join(base, "wg_parser.c"),
     }
+    st = PatchStatus("gst-no-gl")
     if not os.path.isdir(base):
         note("find", "SKIP: %s missing" % DIR)
-        return 0
+        st.skip("%s 不存在（该树无 winegstreamer）" % DIR)
+        return finish(st)
     # 先探：是否有 GstGL 机制（老结构）
     unixlib = rd(files["unixlib.c"]) if os.path.isfile(files["unixlib.c"]) else ""
     if "GstGLDisplay *gl_display;" not in unixlib and MARK not in unixlib:
         note("find", "SKIP: no GstGL mechanism in unixlib.c (newer upstream) -> nothing to do")
-        return 0
+        st.skip("unixlib.c 无 GstGL 机制（上游已移除）")
+        return finish(st)
     if MARK in unixlib:
         note("idempotent", "already contains wine_gst_no_gl -> skip")
-        return 0
+        st.idempotent("已含 wine_gst_no_gl")
+        return finish(st)
     results = []
     for name in ["unix_private.h", "unixlib.c", "wg_parser.c"]:
         p = files[name]
@@ -153,8 +174,9 @@ def main():
         else:
             results.append((name, fn(p)))
     for name, r in results:
-        note(name, r)
-    return 0
+        # 不再调用 note()（会重复打印），直接按类别记录
+        getattr(st, classify(r))("%s: %s" % (name, r))
+    return finish(st)
 
 
 if __name__ == "__main__":
