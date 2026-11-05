@@ -505,6 +505,8 @@ jobs:
                # GStreamer runtime libs (real .so.N)
                [libgstreamer1.0-0]="g/gstreamer1.0"
                [libgstreamer-plugins-base1.0-0]="g/gst-plugins-base1.0"
+               # libgstgl-1.0.so.0 实体在独立包里，-dev 只提供指向它的软链
+               [libgstreamer-gl1.0-0]="g/gst-plugins-base1.0"
             )
             # 某些包的新版本（sid）会拆分/移除 .pc 文件，导致 pkg-config 失效。
             # 例：libglib2.0-dev 2.90（sid）把 glib-2.0.pc/gobject-2.0.pc 拆走了，
@@ -1254,13 +1256,23 @@ jobs:
             fi
           done
           echo "--- libs 实体检查（链接 -lgst*-1.0 是否可解析）"
+          # 关键：不能只看 .so 软链存在，必须确认 -f 能打开（防止悬空链接，
+          # 例如 libgstgl-1.0.so -> libgstgl-1.0.so.0 而后者来自未下载的
+          # libgstreamer-gl1.0-0，此时 ls 通过但 ld 报 cannot find -lgstgl-1.0）
+          GST_SO_BAD=0
           for _l in gstreamer-1.0 gstbase-1.0 gstvideo-1.0 gstaudio-1.0 gsttag-1.0 gstgl-1.0; do
-            if ls /usr/aarch64-linux-gnu/lib/lib${_l}.so >/dev/null 2>&1; then
-              echo "    ok   lib${_l}.so -> $(readlink -f /usr/aarch64-linux-gnu/lib/lib${_l}.so 2>/dev/null | xargs -r basename)"
+            _p=/usr/aarch64-linux-gnu/lib/lib${_l}.so
+            if [ -f "$_p" ]; then
+              echo "    ok   lib${_l}.so -> $(basename "$(readlink -f "$_p")")"
+            elif [ -e "$_p" ]; then
+              echo "    ❌ 悬空软链 lib${_l}.so -> $(readlink "$_p")（目标文件缺失）"
+              GST_SO_BAD=$((GST_SO_BAD+1))
             else
-              echo "    FAIL lib${_l}.so 不存在"
+              echo "    ❌ lib${_l}.so 不存在"
+              GST_SO_BAD=$((GST_SO_BAD+1))
             fi
           done
+          [ "$GST_SO_BAD" -eq 0 ] || echo "    ⚠️ 共 $GST_SO_BAD 个 gst 库不可用"
           echo "--- AC_CHECK_LIB 等价链接测试（gst_pad_new from -lgstreamer-1.0）"
           # 模拟 wine 的 AC_CHECK_LIB(gstreamer-1.0, gst_pad_new)：只声明符号，不 include 头
           printf '%s\n' 'extern void *gst_pad_new(void);' \
