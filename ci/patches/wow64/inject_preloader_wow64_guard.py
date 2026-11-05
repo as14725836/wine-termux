@@ -78,6 +78,8 @@ import sys
 
 SENTINEL = "/* TERMUX_WOW64_HOSTGUARD */"
 
+from strict_patch import PatchStatus, finish
+
 # ---------------------------------------------------------------- loader.c
 HELPER = """
 /* TERMUX_WOW64_HOSTGUARD */
@@ -199,11 +201,23 @@ def patch_loader(path):
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else ".."
     target = os.path.join(root, "dlls", "ntdll", "unix", "loader.c")
+    st = PatchStatus("preloader-guard")
     if not os.path.isfile(target):
         print("  [skip] %s not found" % target)
-        return 0
-    patch_loader(target)
-    return 0
+        st.skip("loader.c 不存在（该树结构不同）")
+        return finish(st)
+    with open(target, "r", encoding="utf-8", errors="surrogateescape") as f:
+        _src = f.read()
+    if SENTINEL in _src:
+        print("  [skip] loader.c already patched")
+        st.idempotent("已含 %s" % SENTINEL)
+        return finish(st)
+    ok = patch_loader(target)
+    if ok:
+        st.applied("loader.c: host_is_foreign_arch + loader_exec + preloader_exec")
+    else:
+        st.missing("loader.c 锚点缺失（get_alternate_wineloader / loader_exec / preloader_exec）")
+    return finish(st)
 
 
 if __name__ == "__main__":
