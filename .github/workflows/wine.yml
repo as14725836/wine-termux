@@ -906,23 +906,91 @@ jobs:
 
           echo "--- Termux 平台补丁完成 ---"
 
-          # ---- (5) 去掉 winegstreamer 的 GstGL 依赖 ----
-          # 启用 GStreamer 后，winegstreamer 默认探测 gstreamer-gl-1.0，
-          # 它依赖 OpenGL/EGL 头与库，Android 交叉编译下易失败。
-          # 用 shim 覆盖 3 个 GstGL 函数 + 2 个类型，并从 configure.ac
-          # 去掉 gstreamer-gl-1.0（对齐 termux-glibc-mangohud / AndreRH）。
-          GSTGL_PY=""
-          for c in /tmp/wt-scripts/ci/strip_gstgl.py \
-                   /tmp/wine-termux/ci/strip_gstgl.py; do
-            [ -f "$c" ] && { GSTGL_PY="$c"; break; }
-          done
-          if [ -n "$GSTGL_PY" ] && [ -d dlls/winegstreamer ]; then
-            echo "  gstgl 脚本: $GSTGL_PY"
-            python3 "$GSTGL_PY" "$PWD" || { echo "ERROR: strip_gstgl 自检失败"; exit 1; }
+          # ---- (5) winegstreamer 运行时 GstGL 开关 (WINE_GST_NO_GL) ----
+          # 对齐 Pipetto-crypto/wine@76f6eab3 "winegstreamer: make opengl conditional"。
+          # 旧做法（strip_gstgl.py）把 #include <gst/gl/gl.h> 换成空桩并删掉
+          # configure.ac 的 gstreamer-gl-1.0 —— GL 能力被编译期永久移除，无运行时开关，
+          # 且 winegstreamer 的 gst_gl_* 符号全部消失。
+          # 新做法保留真实 GL 代码与 gstreamer-gl-1.0 依赖，新增 int wine_gst_no_gl：
+          # 默认 -1（不干预，走 GL）；export WINE_GST_NO_GL=1 时跳过 GstGL
+          # display/context 初始化，纯 CPU 软解。
+          # 幂等；无 GstGL 机制的树 / 已带该补丁的树自动跳过。
+          if [ ! -d dlls/winegstreamer ]; then
+            echo "  SKIP: 该树无 dlls/winegstreamer（GstGL 开关未注入）"
+          elif grep -q 'wine_gst_no_gl' dlls/winegstreamer/unixlib.c 2>/dev/null; then
+            echo "  SKIP: 已含 wine_gst_no_gl（上游自带或已注入）"
+          elif ! grep -q 'GstGLDisplay \*gl_display;' dlls/winegstreamer/unixlib.c 2>/dev/null; then
+            echo "  SKIP: unixlib.c 无 GstGLDisplay *gl_display（上游已移除 GstGL 机制）"
           else
-            echo "  WARN: strip_gstgl.py 未找到，或该树无 winegstreamer（GstGL 依赖未处理）"
+            echo "--- 修改前"
+            grep -n 'GSTREAMER,\[' configure.ac || true
+            grep -n 'GstGLDisplay \*gl_display;' dlls/winegstreamer/unixlib.c || true
+
+            # 1) unix_private.h: extern 声明
+            GST_H=dlls/winegstreamer/unix_private.h
+            if [ -f "${GST_H}" ] && ! grep -q 'wine_gst_no_gl' "${GST_H}"; then
+              perl -0pi -e 's{(extern NTSTATUS wg_init_gstreamer\(void \*args\);)}{$1\n\nextern int wine_gst_no_gl;}' "${GST_H}"
+              echo "  OK: ${GST_H} extern 已注入"
+            fi
+
+            # 2) unixlib.c: 定义 + env 读取 + 置位时跳过 GL 初始化
+            GST_U=dlls/winegstreamer/unixlib.c
+            perl -0pi -e 's{(GstGLDisplay \*gl_display;)}{$1\nint wine_gst_no_gl = -1;}' "${GST_U}"
+            # 注意：\t/\n 必须由 perl 双引号字符串展开，不能走 $ENV（$ENV 不做转义）
+            if grep -q 'media_converter_init' "${GST_U}"; then
+              perl -0pi -e '
+                my $e = "\tif (wine_gst_no_gl == -1)\n\t\twine_gst_no_gl = getenv(\"WINE_GST_NO_GL\") && atoi(getenv(\"WINE_GST_NO_GL\"));\n\n";
+                my $b = "\tif (wine_gst_no_gl) {\n\t\tif (!media_converter_init())\n\t\t\treturn STATUS_UNSUCCESSFUL;\n\t\treturn STATUS_SUCCESS;\n\t}\n\t\n";
+                s{(    if \(!\(gl_display = gst_gl_display_new\(\)\)\))}{$e$b$1};
+              ' "${GST_U}"
+              echo "  OK: ${GST_U} env 读取 + media_converter_init 短路分支"
+            else
+              perl -0pi -e '
+                my $e = "\tif (wine_gst_no_gl == -1)\n\t\twine_gst_no_gl = getenv(\"WINE_GST_NO_GL\") && atoi(getenv(\"WINE_GST_NO_GL\"));\n\n";
+                my $b = "\tif (wine_gst_no_gl)\n\t\treturn STATUS_SUCCESS;\n\t\n";
+                s{(    if \(!\(gl_display = gst_gl_display_new\(\)\)\))}{$e$b$1};
+              ' "${GST_U}"
+              echo "  OK: ${GST_U} env 读取 + 直接返回分支（该树无 media_converter_init）"
+            fi
+
+            # 3) wg_parser.c: use_opengl 钩子（is_kirikiri_game 仅在锚点存在时才做空指针防护）
+            GST_P=dlls/winegstreamer/wg_parser.c
+            if ! grep -q 'params->use_opengl' "${GST_P}" 2>/dev/null; then
+              echo "  WARN: ${GST_P} 无 params->use_opengl，跳过"
+            else
+              if grep -q 'if (is_kirikiri_game(game_id))' "${GST_P}"; then
+                perl -0pi -e 's{if \(is_kirikiri_game\(game_id\)\)(\s*\n\s*params->use_opengl = false;)}{if (game_id \&\& is_kirikiri_game(game_id))$1}' "${GST_P}"
+                echo "  OK: ${GST_P} kirikiri 空指针防护"
+              fi
+              if grep -q 'if (!(parser = calloc(1, sizeof(\*parser))))' "${GST_P}"; then
+                perl -0pi -e '
+                  my $h = "\n    if (wine_gst_no_gl)\n        params->use_opengl = false;\n";
+                  s{(    if \(!\(parser = calloc\(1, sizeof\(\*parser\)\)\)\)\n        return E_OUTOFMEMORY;\n)}{$1$h};
+                ' "${GST_P}"
+                echo "  OK: ${GST_P} use_opengl 钩子（calloc 之后）"
+              else
+                echo "  WARN: ${GST_P} 无 calloc 锚点，改用 use_opengl 赋值处兜底"
+                perl -0pi -e 's{(if \(\(parser->use_opengl = params->use_opengl && gl_display\)\))}{if (wine_gst_no_gl) params->use_opengl = false;\n    $1}' "${GST_P}"
+              fi
+            fi
+
+            # 自检
+            grep -q 'int wine_gst_no_gl = -1;' "${GST_U}"  || { echo "ERROR: unixlib.c 缺变量定义"; exit 1; }
+            grep -q 'WINE_GST_NO_GL' "${GST_U}"             || { echo "ERROR: unixlib.c 缺 env 读取"; exit 1; }
+            grep -q 'wine_gst_no_gl' "${GST_P}"             || { echo "ERROR: wg_parser.c 缺 use_opengl 钩子"; exit 1; }
+            [ ! -f "${GST_H}" ] || grep -q 'extern int wine_gst_no_gl;' "${GST_H}" || { echo "ERROR: unix_private.h 缺 extern"; exit 1; }
+            # 防回归：字面量 \t/\n 不得泄漏进源码；旧垫片不得残留
+            if grep -n '\\tif (wine_gst_no_gl\|\\n    if (wine_gst_no_gl' "${GST_U}" "${GST_P}" 2>/dev/null; then
+              echo "ERROR: 字面量 \\t/\\n 泄漏进源码（转义未展开）"; exit 1
+            fi
+            if grep -rn 'gst_gl_display_new() (NULL)' dlls/winegstreamer/ 2>/dev/null; then
+              echo "ERROR: 残留旧 GstGL 空桩垫片，与本补丁冲突"; exit 1
+            fi
+            echo "  OK: WINE_GST_NO_GL 已就绪（默认走 GL，设为 1 则纯软解）"
+            grep -n 'wine_gst_no_gl\|WINE_GST_NO_GL' "${GST_U}" "${GST_P}" "${GST_H}" 2>/dev/null || true
+            grep -n 'GSTREAMER,\[' configure.ac || true
           fi
-          # ---- GstGL 去依赖 end ----
+          # ---- GstGL 运行时开关 end ----
 
           # ---- Termux 平台补丁 end ----
 
