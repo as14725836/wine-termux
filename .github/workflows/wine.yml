@@ -1255,6 +1255,20 @@ jobs:
               echo "    FAIL $_m :: $(tr '\n' ' ' < /tmp/e1.txt)"
             fi
           done
+          echo "--- 依赖闭包体检（一次性列出所有缺失 .pc / 悬空 .so）"
+          # 这是排错工具：手工逐个 pkg-config --exists 一次只能暴露一层缺口，
+          # 实际排 x11->xcb->xau->xdmcp->libgstreamer-gl1.0-0 用了 8 轮 CI。
+          # 闭包检查会递归展开 Requires/Requires.private 并给出补包建议。
+          if [ -f "${WS}/ci/check_pkgconfig_closure.py" ]; then
+            python3 "${WS}/ci/check_pkgconfig_closure.py" \
+              --pc-dir /usr/aarch64-linux-gnu/lib/pkgconfig \
+              --pc-dir /usr/aarch64-linux-gnu/lib64/pkgconfig \
+              --pc-dir /usr/aarch64-linux-gnu/share/pkgconfig \
+              --lib-dir /usr/aarch64-linux-gnu/lib \
+              --require "$GST_ALL" || echo "  (闭包体检发现缺口，见上)"
+          else
+            echo "  (skip: ${WS}/ci/check_pkgconfig_closure.py 不存在)"
+          fi
           echo "--- libs 实体检查（链接 -lgst*-1.0 是否可解析）"
           # 关键：不能只看 .so 软链存在，必须确认 -f 能打开（防止悬空链接，
           # 例如 libgstgl-1.0.so -> libgstgl-1.0.so.0 而后者来自未下载的
@@ -1329,7 +1343,23 @@ jobs:
             --without-gssapi --without-krb5 --without-pcap --without-pcsclite \
             --without-sane --without-usb --without-v4l2 --without-dbus --without-udev \
             --with-gstreamer \
-            2>&1 | tail -120 || { echo "❌ configure 失败"; tail -60 config.log; exit 1; }
+            > /tmp/configure-full.log 2>&1
+          _cf_rc=$?
+          # 失败时不再只 tail -120（gst 检查段常在截断窗口之外，排错时看不到），
+          # 而是：全量日志进 artifact + 精准提取真正的报错。
+          if [ $_cf_rc -ne 0 ]; then
+            echo "❌ configure 失败 (rc=$_cf_rc)"
+            echo "----- 末尾 60 行 -----"
+            tail -60 /tmp/configure-full.log || true
+            echo "----- 真正的报错（configure: error / conftest.err / pkg-config）-----"
+            grep -nE 'configure: error|conftest\.err|Package .* (was not found|not found)|No package|fatal error' \
+              /tmp/configure-full.log /config.log 2>/dev/null | head -40 || true
+            echo "----- config.log 里的 pkg-config 失败上下文 -----"
+            awk '/conftest\.err|Package .*not found/{f=1} f{print; n++} n>40{exit}' config.log 2>/dev/null || true
+            echo "----- 提示：完整日志见 artifact configure-full.log -----"
+            exit 1
+          fi
+          echo "✅ configure ok (全量日志 $(wc -l < /tmp/configure-full.log) 行)"
           set +x
 
           test -f config.status || { echo "❌ 无 config.status"; tail -80 config.log; exit 1; }
@@ -1839,6 +1869,19 @@ jobs:
           name: ${{ env.BUILD_NAME }}
           path: /tmp/artifacts/*
           retention-days: 30
+
+      # 构建日志单独成一个 artifact：失败时也能下载（if: always）。
+      # 起因是 gst 排错时 configure 输出被 tail -120 截断，
+      # 关键检查段正好落在窗口外，只能靠反复加诊断再跑一轮 CI。
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/configure-full.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Publish Release
         if: ${{ inputs.publish_release != 'false' }}
