@@ -58,6 +58,8 @@ import sys
 REL = "server/fd.c"
 MARK = "NO_EPOLL_PWAIT2_FOR_TERMUX"
 
+from strict_patch import PatchStatus, finish
+
 # 匹配探测整段（两种可能写法）
 PROBE_RE = re.compile(
     r"([ \t]*)int[ \t]+use_epoll_pwait2[ \t]*=[ \t]*!!epoll_pwait2[ \t]*;[ \t]*\n"
@@ -83,21 +85,25 @@ def main():
     root = sys.argv[1].rstrip("/")
     dry = "--dry-run" in sys.argv
     path = os.path.join(root, REL)
+    st = PatchStatus("no-epoll2")
     if not os.path.isfile(path):
         note("find", "SKIP: %s 不存在" % REL)
-        return 0
+        st.skip("%s 不存在（该树结构不同）" % REL)
+        return finish(st)
 
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         src = f.read()
 
     if MARK in src:
         note("idempotent", "已注入 %s → 跳过" % MARK)
-        return 0
+        st.idempotent("已含 %s" % MARK)
+        return finish(st)
 
     m = PROBE_RE.search(src)
     if not m:
         note("find", "SKIP: 未找到 use_epoll_pwait2 探测段（该树不用 epoll_pwait2）")
-        return 0
+        st.skip("未找到 epoll_pwait2 探测段（该树不用它）")
+        return finish(st)
 
     indent = m.group(1)
     new_block = REPLACEMENT.replace("{indent}", indent)
@@ -106,12 +112,14 @@ def main():
     if dry:
         note("dry-run", "would replace %d bytes of epoll_pwait2 probe with use_epoll_pwait2=0"
              % len(m.group(0)))
-        return 0
+        st.applied("(dry-run) 将替换 %d 字节探测段" % len(m.group(0)))
+        return finish(st)
 
     with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write(new_src)
     note("write", "已禁用 epoll_pwait2 探测 → 退回 epoll_wait")
-    return 0
+    st.applied("已禁用 epoll_pwait2 探测 → 退回 epoll_wait")
+    return finish(st)
 
 
 if __name__ == "__main__":
