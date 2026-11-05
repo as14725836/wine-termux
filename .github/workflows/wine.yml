@@ -388,6 +388,11 @@ jobs:
                # gstreamer-video/audio-1.0 的 Requires.private 需要 orc-0.4
                [liborc-0.4-dev]="o/orc"
                [libgstreamer-plugins-base1.0-dev]="g/gst-plugins-base1.0"
+               # gstreamer-gl-1.0.pc 的 Requires.private 需要这三个，否则 pkg-config
+               # --cflags 返回空 → WINE_PACKAGE_FLAGS 跳过检查 → configure 误判 gst 缺失
+               [libx11-xcb-dev]="libx/libx11"
+               [libgudev-1.0-dev]="libg/libgudev"
+               [libgbm-dev]="m/mesa"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
             # 而实体在 runtime 包里（未下载会出现断链 → 链接失败）。这里一并拉取。
@@ -1213,7 +1218,8 @@ jobs:
           ls /usr/aarch64-linux-gnu/lib64/pkgconfig/ 2>/dev/null | tr '\n' ' '
           echo
           echo "--- pkg-config probe"
-          for m in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 glib-2.0 gobject-2.0; do
+          for m in gstreamer-1.0 gstreamer-base-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0 \
+             gstreamer-gl-1.0 glib-2.0 gobject-2.0; do
             if pkg-config --print-errors --exists "$m" 2>/tmp/pcerr.txt; then
               echo "  $m: OK cflags=[$(pkg-config --cflags "$m" 2>/dev/null)] libs=[$(pkg-config --libs "$m" 2>/dev/null)]"
             else
@@ -1225,8 +1231,10 @@ jobs:
           echo "--- libs"
           ls -l /usr/aarch64-linux-gnu/lib/libgstreamer-1.0.so* 2>&1 | head -4 || true
           echo "--- manual compile+link test"
-          printf '%s\n' '#include <gst/gst.h>' 'int main(void){ return gst_pad_new("probe") != 0 ? 0 : 1; }' > /tmp/gstchk.c
-          if aarch64-linux-gnu-gcc $(pkg-config --cflags gstreamer-1.0 2>/dev/null) /tmp/gstchk.c -o /tmp/gstchk $(pkg-config --libs gstreamer-1.0 2>/dev/null) 2>/tmp/gstchk.err; then
+          printf '%s\n' '#include <gst/gst.h>' \
+               'int main(void){ return gst_element_factory_find("probe") != 0 ? 0 : 1; }' > /tmp/gstchk.c
+          if aarch64-linux-gnu-gcc $(pkg-config --cflags gstreamer-1.0 2>/dev/null) /tmp/gstchk.c \
+               $(pkg-config --libs gstreamer-1.0 2>/dev/null) -o /tmp/gstchk 2>/tmp/gstchk.err; then
             echo "  link test OK"
           else
             echo "  link test FAIL:"
