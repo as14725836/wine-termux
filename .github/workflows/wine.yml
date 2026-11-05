@@ -394,6 +394,10 @@ jobs:
                [libgudev-1.0-dev]="libg/libgudev"
                # gudev-1.0.pc 的 Requires.private 需要 libudev.pc
                [libudev-dev]="s/systemd"
+               # x11.pc / x11-xcb.pc 都 Require xcb；缺 xcb.pc 会让整条链解析失败
+               [libxcb1-dev]="libx/libxcb"
+               # xcb.pc -> xau.pc -> xproto; 缺 xau.pc 链同样断
+               [libxau-dev]="libx/libxau"
                [libgbm-dev]="m/mesa"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
