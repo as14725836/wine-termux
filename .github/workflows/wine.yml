@@ -398,6 +398,8 @@ jobs:
                [libxcb1-dev]="libx/libxcb"
                # xcb.pc -> xau.pc -> xproto; 缺 xau.pc 链同样断
                [libxau-dev]="libx/libxau"
+               # xcb.pc 还 Require xdmcp.pc
+               [libxdmcp-dev]="libx/libxdmcp"
                [libgbm-dev]="m/mesa"
             )
             # 运行时库：-dev 包里的 libXXX.so 是指向 libXXX.so.N 的软链，
