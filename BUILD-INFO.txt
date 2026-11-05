@@ -1,0 +1,19 @@
+wine source    : upstream wine-mirror
+source ref     : (default)
+wine tag       : wine-11.21
+package name   : dxgi
+variant        : default
+staging        : on
+39-bit patch   : applied
+enable_mf      : false
+enable_esync   : true
+workflow sha   : 422ff98c34cd93dcd6cb5280b1e62216a2c63208
+run            : #127 (id 41989436521)
+built at (UTC) : 2026-11-05T08:22:22Z
+
+-- 源码树校验 --
+virtual.c 0x7fffff0000           : 4
+virtual.c 0x7ffe000000           : 1
+virtual.c wine_emulator_detected : 3
+virtual.c box64/emu compat       : 1
+seccomp NATIVE_SYSCALL_ADDRESS_START : 
