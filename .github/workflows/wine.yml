@@ -1034,8 +1034,22 @@ jobs:
             patch -p1 --forward --dry-run < "$WS/wine-box64-noexec.patch" >/dev/null 2>&1 && \
               patch -p1 --forward < "$WS/wine-box64-noexec.patch" || echo "  跳过（版本不匹配）"
           fi
-          if [ -f "$WS/wine-box64-compat.patch" ]; then
-            patch -p1 --forward < "$WS/wine-box64-compat.patch" || echo "  box64-compat 跳过"
+          # wine-box64-compat：不再用行号补丁。wine 11.x 上 hunk#1（函数定义）必然
+          # FAILED，hunk#2（调用点）却因 fuzz 命中，会留下“有调用、无定义”的
+          # virtual.c，编译时报 implicit declaration of 'wine_emulator_detected'。
+          # 统一改用锚点式幂等注入器 ci/fix_box64_compat.py。
+          if [ -f dlls/ntdll/unix/virtual.c ]; then
+            _B64FIX=""
+            for _c in "$WS/ci/fix_box64_compat.py" "/tmp/wine-termux/ci/fix_box64_compat.py" "./ci/fix_box64_compat.py"; do
+              if [ -f "$_c" ]; then _B64FIX="$_c"; break; fi
+            done
+            if [ -n "$_B64FIX" ]; then
+              echo "--- box64-compat 结构化注入 ---"
+              python3 "$_B64FIX" dlls/ntdll/unix/virtual.c || { echo "!!! FAIL: fix_box64_compat.py"; exit 1; }
+              rm -f dlls/ntdll/unix/virtual.c.rej dlls/ntdll/unix/virtual.c.orig
+            else
+              echo "  WARN: 找不到 fix_box64_compat.py，跳过 box64-compat"
+            fi
           fi
 
           # 5.8 proton-wine 源码修补：server.c 调用 esync_init() 但未 include esync.h
