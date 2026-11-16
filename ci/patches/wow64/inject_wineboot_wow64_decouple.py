@@ -168,7 +168,43 @@ NEW = r"""        /* TERMUX_WINEBOOT_WOW64_DECOUPLE */
         }"""
 
 
+# wineboot.c 的上游版本差异：
+#   旧：安装循环里没有等待窗口
+#   新：循环外面包了 show_wait_window() / DestroyWindow( hwnd )
+# 两种都要支持，否则上游一改动锚点就失效。
+OLD2 = OLD.replace(
+    """        {
+            for (;;)""",
+    """        {
+            HWND hwnd = show_wait_window();
+            for (;;)""",
+    1,
+).replace(
+    """                count++;
+            }
+        }""",
+    """                count++;
+            }
+            DestroyWindow( hwnd );
+        }""",
+    1,
+)
+
+NEW2 = NEW.replace(
+    '        process = start_rundll32( inf_path, L"PreInstall"',
+    '        HWND hwnd = show_wait_window();\n        process = start_rundll32( inf_path, L"PreInstall"',
+    1,
+).replace(
+    '        /* TERMUX_WINEBOOT_WOW64_DECOUPLE: 校验 syswow64',
+    '        DestroyWindow( hwnd );\n        /* TERMUX_WINEBOOT_WOW64_DECOUPLE: 校验 syswow64',
+    1,
+)
+
+VARIANTS = [(OLD, NEW), (OLD2, NEW2)]
+
+
 def patch_file(path):
+    global OLD, NEW
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         src = f.read()
 
@@ -176,6 +212,8 @@ def patch_file(path):
         print("  [skip] already patched")
         return True
 
+    if OLD not in src and OLD2 in src:
+        OLD, NEW = OLD2, NEW2
     if OLD not in src:
         print("  [WARN] target block not found in %s" % path)
         return False
