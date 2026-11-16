@@ -108,11 +108,11 @@ static BOOL host_is_foreign_arch(void)
 # "start.exe /exec" 路由（那是单架构包已验证可行的路径）。foreign-arch 的
 # 跳过逻辑放在 loader_exec() 里，只影响"实际 spawn 子进程"这一步。
 
-OLD_EXEC = """    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, machine );
-
-    argv[1] = strdup( wineloader );"""
-
-NEW_EXEC = """    /* TERMUX_WOW64_HOSTGUARD: x86_64 Wine 在 box64/FEX 上时，不能 exec 外部
+# 上游 preloader_exec() 的签名和排版都变过：
+#   <= wine-10.x : preloader_exec( char **argv, WORD machine )
+#   >= wine-11.x : preloader_exec( char **argv )   (machine 参数被移除)
+# 而且两条语句之间可能夹空行，所以这里用正则匹配，两种签名都能命中。
+_GUARD_BODY = """    /* TERMUX_WOW64_HOSTGUARD: x86_64 Wine 在 box64/FEX 上时，不能 exec 外部
      * 32 位 loader（lib/wine/i386-unix/wine）—— box64 未编 BOX32/无 box86 时
      * 无法执行该 32 位 ELF，会导致 wineboot 起 syswow64\\rundll32.exe 时
      * CreateProcessW 立即失败 (err=2)，Wow64Install 不执行，syswow64/ 为空。
@@ -120,10 +120,21 @@ NEW_EXEC = """    /* TERMUX_WOW64_HOSTGUARD: x86_64 Wine 在 box64/FEX 上时，
      * （wow64.dll + wow64cpu.dll）处理 32 位 PE —— 与单架构包行为一致。 */
     if (!(machine == IMAGE_FILE_MACHINE_I386 && host_is_foreign_arch()))
     {
-        if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, machine );
+        if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv%(argsig)s );
     }
-
     argv[1] = strdup( wineloader );"""
+
+EXEC_RE = re.compile(
+    r'if \(\(\(argv\[1\] = get_alternate_wineloader\( machine \)\)\)\) '
+    r'preloader_exec\( argv(?P<arg>, machine)? \);\s*'
+    r'argv\[1\] = strdup\( wineloader \);'
+)
+
+
+def _exec_repl(m):
+    body = _GUARD_BODY % {"argsig": m.group("arg") or ""}
+    return body[4:] if body.startswith("    ") else body
+
 
 OLD_PRE = """    if (machine == IMAGE_FILE_MACHINE_AMD64
         && ((p = remove_tail( argv[1], "x86_64-unix/wine" )) || (p = remove_tail( argv[1], "i386-unix/wine64" ))))
@@ -134,23 +145,18 @@ OLD_PRE = """    if (machine == IMAGE_FILE_MACHINE_AMD64
     else
 #endif
 """
-
 NEW_PRE = """    if (machine == IMAGE_FILE_MACHINE_AMD64
         && !is_win64
         && ((p = remove_tail( argv[1], "i386-unix/wine" )) || (p = remove_tail( argv[1], "i386-unix/wine64" ))))
     {
         /* TERMUX_WOW64_HOSTGUARD: 只有当前是 32 位宿主 loader（!is_win64）且目标
-         * PE 是 AMD64 时，才切到 32 位宿主里的 64 位 loader (i386-unix/wine64)。
-         * dwproton 原版用 remove_tail(argv[1],"x86_64-unix/wine") 判定 —— 那恰是
-         * 64 位宿主的 wineloader，会让 64 位 wineboot 在 box64 上误切到
-         * i386-unix/wine64（靠 dlopen 64 位 .so，box64 下必失）。 */
+         * PE 是 AMD64 时，才切到 32 位宿主里的 64 位 loader (i386-unix/wine64)。 */
         asprintf( &argv[0], "%si386-unix/wine64-preloader", p );
         asprintf( &argv[1], "%si386-unix/wine64", p );
     }
     else
 #endif
 """
-
 
 def patch_loader(path):
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
@@ -180,21 +186,22 @@ def patch_loader(path):
     changed = True
 
     # 2) loader_exec: foreign-arch 宿主上跳过外部 32 位 loader
-    if OLD_EXEC not in src:
-        print("  [WARN] loader_exec block not found")
+    src, n = EXEC_RE.subn(_exec_repl, src, count=1)
+    if n == 0:
+        print("  [WARN] loader_exec block not found (regex, both preloader_exec signatures)")
         return False
-    src = src.replace(OLD_EXEC, NEW_EXEC, 1)
 
-    # 3) preloader_exec: 修 AMD64 切换条件
-    if OLD_PRE not in src:
-        print("  [WARN] preloader_exec block not found")
-        return False
-    src = src.replace(OLD_PRE, NEW_PRE, 1)
-
+    # 3) preloader_exec: 修 AMD64 切换条件（上游 >= wine-11 已移除该块，此时跳过）
+    pre_ok = False
+    if OLD_PRE in src:
+        src = src.replace(OLD_PRE, NEW_PRE, 1)
+        pre_ok = True
+    else:
+        print("  [note] preloader_exec AMD64 switch block absent (removed upstream), skipped")
     if changed:
         with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(src)
-        print("  [ok] patched loader.c (host_is_foreign_arch + loader_exec + preloader_exec)")
+        print("  [ok] patched loader.c (host_is_foreign_arch + loader_exec%s)" % ("" if pre_ok else " [preloader block absent]"))
     return True
 
 
@@ -222,3 +229,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
