@@ -40,8 +40,8 @@ wineserver 自己的 SIGSEGV handler 收到信号后 abort()（SIGABRT），
 
 修复
 ----
-把 use_epoll_pwait2 的探测整段改成直接 0，等价于“这台内核没有
-epoll_pwait2”，于是 main_loop 一直走 epoll_wait 分支。
+有 use_epoll_pwait2 探测的源码直接将其设为 0。有 failed_epoll_pwait2
+回退标志的源码则将标志初始化为 1。两种写法都会直接走 epoll_wait。
 epoll_wait 在所有 Linux/Android 内核上都可用，wine 用了十几年。
 
 幂等
@@ -66,6 +66,9 @@ PROBE_RE = re.compile(
     r"(?:[ \t]*if[ \t]*\([ \t]*use_epoll_pwait2[^\n]*\n"
     r"(?:[ \t]*use_epoll_pwait2[ \t]*=[ \t]*0[ \t]*;[ \t]*\n)?"
     r")?")
+
+# Wine 11.22 先尝试 epoll_pwait2，失败后才将此标志置为 1。
+FALLBACK_RE = re.compile(r"^([ \t]*static int failed_epoll_pwait2 = )0;[ \t]*$", re.MULTILINE)
 
 REPLACEMENT = (
     "{indent}int use_epoll_pwait2 = 0; /* {mark}\n"
@@ -100,25 +103,26 @@ def main():
         return finish(st)
 
     m = PROBE_RE.search(src)
-    if not m:
-        note("find", "SKIP: 未找到 use_epoll_pwait2 探测段（该树不用 epoll_pwait2）")
-        st.skip("未找到 epoll_pwait2 探测段（该树不用它）")
-        return finish(st)
-
-    indent = m.group(1)
-    new_block = REPLACEMENT.replace("{indent}", indent)
+    if m:
+        new_block = REPLACEMENT.replace("{indent}", m.group(1))
+    else:
+        m = FALLBACK_RE.search(src)
+        if not m:
+            if re.search(r"\bepoll_pwait2\s*\(", src):
+                st.missing("存在 epoll_pwait2 调用，但未识别到探测段或回退标志")
+            else:
+                st.skip("该树没有 epoll_pwait2 调用")
+            return finish(st)
+        new_block = f"{m.group(1)}1; /* {MARK} */"
     new_src = src[:m.start()] + new_block + src[m.end():]
 
     if dry:
-        note("dry-run", "would replace %d bytes of epoll_pwait2 probe with use_epoll_pwait2=0"
-             % len(m.group(0)))
-        st.applied("(dry-run) 将替换 %d 字节探测段" % len(m.group(0)))
+        st.applied("(dry-run) 将禁用 epoll_pwait2，直接使用 epoll_wait")
         return finish(st)
 
     with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write(new_src)
-    note("write", "已禁用 epoll_pwait2 探测 → 退回 epoll_wait")
-    st.applied("已禁用 epoll_pwait2 探测 → 退回 epoll_wait")
+    st.applied("已禁用 epoll_pwait2，直接使用 epoll_wait")
     return finish(st)
 
 

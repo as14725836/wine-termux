@@ -7,6 +7,11 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      validation_only:
+        description: "仅验证构建，产物上传至 Actions"
+        required: false
+        type: boolean
+        default: false
       tag:
         description: "Wine release tag（可选，例如：wine-9.22，不填则使用最新tag）"
         required: false
@@ -522,15 +527,25 @@ jobs:
           fi
           sudo chmod 644 "/tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz"
           sudo chmod 644 /tmp/archlinux/tmp/ccache.tar.xz
+      - name: Upload validation build
+        if: inputs.validation_only && steps.need_build.outputs.new_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-tkg-wow64-validation
+          path: /tmp/archlinux/tmp/wine-${{ steps.wine_tag.outputs.wine_ver }}-${{ steps.wine_tag.outputs.PKG_NAME }}-tkg-stg-ge.tar.xz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
       - name: Save ccache
-        if: steps.need_build.outputs.new_release == 'true' && github.run_attempt == 1
+        if: ${{ !inputs.validation_only && steps.need_build.outputs.new_release == 'true' && github.run_attempt == 1 }}
         uses: actions/cache/save@v5
         with:
           path: /tmp/archlinux/tmp/ccache.tar.xz
           key: wine-tkg-ccache-Linux-x86_64
 
       - name: Upload Source to wine-termux
-        if: steps.need_build.outputs.new_release == 'true'
+        if: ${{ !inputs.validation_only && steps.need_build.outputs.new_release == 'true' }}
         run: |
           src_name="${{ steps.wine_tag.outputs.wine_src_dir }}"
           [ -n "$src_name" ] || src_name="wine-git"
@@ -578,7 +593,7 @@ jobs:
           git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/as14725836/wine-termux.git
           git push -f --set-upstream origin "$branch_name"
       - name: Create GitHub Release
-        if: steps.need_build.outputs.new_release == 'true'
+        if: ${{ !inputs.validation_only && steps.need_build.outputs.new_release == 'true' }}
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -609,11 +624,11 @@ jobs:
           prerelease: false
 
       - name: Save current tag to cache file
-        if: steps.need_build.outputs.new_release == 'true'
+        if: ${{ !inputs.validation_only && steps.need_build.outputs.new_release == 'true' }}
         run: |
           if [ -f .wine_current_tag ]; then cp .wine_current_tag .wine_last_tag; else echo "WARN: no .wine_current_tag, skip"; fi
       - name: Update tag cache
-        if: steps.need_build.outputs.new_release == 'true'
+        if: ${{ !inputs.validation_only && steps.need_build.outputs.new_release == 'true' }}
         uses: actions/cache@v4
         with:
           path: .wine_last_tag
