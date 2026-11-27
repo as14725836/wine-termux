@@ -1,0 +1,11 @@
+--- loader/preloader.c	2026-10-03 21:52:29.819315917 +0000
++++ loader/preloader.c	2026-10-03 21:52:29.819315917 +0000
+@@ -115,7 +115,7 @@
+     { (void *)0x000000010000, 0x00100000 },  /* DOS area */
+     { (void *)0x000000110000, 0x67ef0000 },  /* low memory area */
+     { (void *)0x00007f000000, 0x00ff0000 },  /* 32-bit top-down allocations + shared user data */
+-    { (void *)0x7ffffe000000, 0x01ff0000 },  /* top-down allocations + virtual heap */
++    { (void *)0x7ffe000000, 0x01ff0000 },  /* top-down allocations + virtual heap */
+ #endif
+     { 0, 0 },                            /* PE exe range set with WINEPRELOADRESERVE */
+     { 0, 0 }                             /* end of list */
