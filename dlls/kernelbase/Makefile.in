@@ -1,0 +1,26 @@
+EXTRADEFS = -DWINBASEAPI= -DWINADVAPI= -DWINUSERAPI= -DWINSHLWAPI=
+MODULE    = kernelbase.dll
+IMPORTLIB = kernelbase
+IMPORTS   = uuid ntdll
+
+EXTRADLLFLAGS = -nodefaultlibs -nostartfiles
+
+SOURCES = \
+	console.c \
+	debug.c \
+	file.c \
+	kernelbase.rc \
+	loader.c \
+	locale.c \
+	main.c \
+	memory.c \
+	path.c \
+	process.c \
+	registry.c \
+	security.c \
+	string.c \
+	sync.c \
+	thread.c \
+	version.c \
+	volume.c \
+	winerror.mc
